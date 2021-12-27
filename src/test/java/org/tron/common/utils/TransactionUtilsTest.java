@@ -18,6 +18,7 @@ public class TransactionUtilsTest extends TestCase {
             assert true;
         } catch (Exception exc) {
             System.err.println("Got unexpected exception " + exc);
+            throw exc;
         }
     }
 }
