@@ -36,6 +36,7 @@ import org.tron.walletserver.WalletApi;
 import java.security.SignatureException;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 import java.util.Scanner;
 
 public class TransactionUtils {
@@ -296,8 +297,7 @@ public class TransactionUtils {
      * @author Evgeniy Melnikov (e.melnikov@unitedtraders.com)
      */
     public static Transaction send(String from, String to, long amount, ECKey privateKey) throws TransactionException {
-        GrpcAPI.TransactionExtention transactionByApi2 = signTransaction(createRawTransaction(from, to, amount), privateKey);
-        Transaction transactionSigned = transactionByApi2.getTransaction();
+        Transaction transactionSigned = signTransactionOffline(Objects.requireNonNull(createRawTransaction(from, to, amount)), privateKey);
         return broadcastTransaction(transactionSigned);
     }
 
@@ -338,9 +338,13 @@ public class TransactionUtils {
     public static Transaction signTransactionOffline(Transaction transaction, String privateKey) {
         byte[] privKeyBytes = org.tron.common.utils.ByteArray.fromHexString(privateKey);
         ECKey myKey = ECKey.fromPrivate(privKeyBytes);
+        return signTransactionOffline(transaction, myKey);
+    }
+
+    public static Transaction signTransactionOffline(Transaction transaction, ECKey privateKey) {
         Transaction.Builder transactionBuilderSigned = transaction.toBuilder();
         byte[] hash = Sha256Sm3Hash.hash(transaction.getRawData().toByteArray());
-        SignatureInterface signature = myKey.sign(hash);
+        SignatureInterface signature = privateKey.sign(hash);
         ByteString bsSign = ByteString.copyFrom(signature.toByteArray());
         transactionBuilderSigned.addSignature(bsSign);
         transaction = transactionBuilderSigned.build();
