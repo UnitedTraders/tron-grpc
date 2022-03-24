@@ -984,7 +984,7 @@ public class GrpcClient {
 
   public String sendTokens( String from, String to, String contract, long rawAmount, String privateKey) throws TransactionException {
     Transaction transaction = createRawTrc20Transaction(from, to, contract, rawAmount, null);
-    Transaction signedTransaction = signRawTransaction(transaction, privateKey);
+    Transaction signedTransaction = TransactionUtils.signTransactionOffline(transaction, privateKey);
     Transaction broadcastTransaction = TransactionUtils.broadcastTransaction(signedTransaction);
     return getTxId(broadcastTransaction);
   }
@@ -1085,7 +1085,7 @@ public class GrpcClient {
     }
   }
 
-   public Transaction signRawTransaction(Transaction transaction, String privateKey) {
+   public Transaction signRawTransactionOnline(Transaction transaction, String privateKey) {
       return TransactionUtils.signTransaction(transaction, ECKey.fromPrivate(ByteArray.fromHexString(privateKey))).getTransaction();
    }
 
