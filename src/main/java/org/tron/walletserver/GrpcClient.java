@@ -982,8 +982,8 @@ public class GrpcClient {
     return getTxId(transaction);
   }
 
-  public String sendTokens(String from, String to, String contract, long rawAmount, String privateKey, Long rawFeeLimit) throws TransactionException {
-    Transaction transaction = createRawTrc20Transaction(from, to, contract, rawAmount, rawFeeLimit);
+  public String sendTokens(String from, String to, String contract, long rawAmount, String privateKey, Double feeLimitInTrx) throws TransactionException {
+    Transaction transaction = createRawTrc20Transaction(from, to, contract, rawAmount, feeLimitInTrx);
     Transaction signedTransaction = TransactionUtils.signTransactionOffline(transaction, privateKey);
     Transaction broadcastTransaction = TransactionUtils.broadcastTransaction(signedTransaction);
     return getTxId(broadcastTransaction);
@@ -994,7 +994,7 @@ public class GrpcClient {
    }
 
    // if feeLimit is null, will use default = 10 TRX * TRX precision
-  public Transaction createRawTrc20Transaction(String from, String to, String contractAddress, long rawAmount, Long feeLimit) throws TransactionException {
+  public Transaction createRawTrc20Transaction(String from, String to, String contractAddress, long rawAmount, Double trxFeeLimit) throws TransactionException {
     byte[] data = Hex.decode(AbiUtil.parseMethod("transfer(address,uint256)", String.format("\"%s\",%s", to, rawAmount), false));
     Contract.TriggerSmartContract triggerSmartContractRequest = Contract.TriggerSmartContract.newBuilder()
             .setContractAddress(ByteString.copyFrom(WalletApi.decodeFromBase58Check(contractAddress)))
@@ -1011,7 +1011,7 @@ public class GrpcClient {
 
     Transaction.Builder transactionBuilder = Transaction.newBuilder(originalTransaction);
     transactionBuilder.getRawDataBuilder()
-            .setFeeLimit(feeLimit == null ? 10_000_000 : feeLimit * 1000_000)
+            .setFeeLimit(trxFeeLimit == null ? 10_000_000 : ((long) (trxFeeLimit * 1000_000)))
             .setTimestamp(System.currentTimeMillis())
             .setExpiration(newestBlock.getBlockHeader().getRawData().getTimestamp() + 10 * 60 * 60 * 1000);
     return TransactionUtils.setReference(transactionBuilder.build(), newestBlock);
