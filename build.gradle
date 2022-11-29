@@ -1,5 +1,5 @@
 group 'tron-grpc'
-version '1.3.0.UT11'
+version '1.3.0.UT12'
 
 apply plugin: 'java'
 apply plugin: 'com.google.protobuf'

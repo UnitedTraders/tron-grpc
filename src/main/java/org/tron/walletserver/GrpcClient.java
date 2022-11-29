@@ -982,8 +982,8 @@ public class GrpcClient {
     return getTxId(transaction);
   }
 
-  public String sendTokens( String from, String to, String contract, long rawAmount, String privateKey) throws TransactionException {
-    Transaction transaction = createRawTrc20Transaction(from, to, contract, rawAmount, null);
+  public String sendTokens(String from, String to, String contract, long rawAmount, String privateKey, Long rawFeeLimit) throws TransactionException {
+    Transaction transaction = createRawTrc20Transaction(from, to, contract, rawAmount, rawFeeLimit);
     Transaction signedTransaction = TransactionUtils.signTransactionOffline(transaction, privateKey);
     Transaction broadcastTransaction = TransactionUtils.broadcastTransaction(signedTransaction);
     return getTxId(broadcastTransaction);
