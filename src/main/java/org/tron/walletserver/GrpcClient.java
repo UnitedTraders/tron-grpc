@@ -78,6 +78,7 @@ import org.tron.protos.Protocol.Transaction;
 import org.tron.protos.Protocol.TransactionInfo;
 import org.tron.protos.Protocol.TransactionSign;
 
+import javax.annotation.Nullable;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -106,7 +107,22 @@ public class GrpcClient {
 //    blockingStub = WalletGrpc.newBlockingStub(channel);
 //  }
 
-  public GrpcClient(String fullnode, String soliditynode, boolean isTestNet) {
+  public GrpcClient(
+          WalletGrpc.WalletBlockingStub blockingStubFull,
+          @Nullable WalletSolidityGrpc.WalletSolidityBlockingStub blockingStubSolidity,
+          @Nullable WalletExtensionGrpc.WalletExtensionBlockingStub blockingStubExtension
+  ) {
+    this.blockingStubFull = blockingStubFull;
+    this.blockingStubSolidity = blockingStubSolidity;
+    this.blockingStubExtension = blockingStubExtension;
+    initStatics();
+  }
+
+  public GrpcClient(
+          String fullnode,
+          String soliditynode,
+          @Deprecated boolean isTestNet
+  ) {
     if (!StringUtils.isEmpty(fullnode)) {
       channelFull = ManagedChannelBuilder.forTarget(fullnode)
           .usePlaintext()
@@ -121,6 +137,10 @@ public class GrpcClient {
       blockingStubExtension = WalletExtensionGrpc.newBlockingStub(channelSolidity);
     }
 
+    initStatics();
+  }
+
+  private void initStatics() {
     GrpcClientHolder.setGrpcClient(this);
 //    if (isTestNet) {
 //        GrpcClientHolder.setPrefix((byte) 0xa0);
