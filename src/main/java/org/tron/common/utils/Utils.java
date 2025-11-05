@@ -23,29 +23,65 @@ import com.alibaba.fastjson.JSONObject;
 import com.google.protobuf.Any;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
-import org.tron.api.GrpcAPI.*;
+import org.apache.commons.lang3.ArrayUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.tron.api.GrpcAPI.BlockExtention;
+import org.tron.api.GrpcAPI.BlockList;
+import org.tron.api.GrpcAPI.BlockListExtention;
+import org.tron.api.GrpcAPI.TransactionApprovedList;
+import org.tron.api.GrpcAPI.TransactionExtention;
+import org.tron.api.GrpcAPI.TransactionList;
+import org.tron.api.GrpcAPI.TransactionListExtention;
+import org.tron.api.GrpcAPI.TransactionSignWeight;
 import org.tron.common.crypto.Hash;
 import org.tron.common.crypto.Sha256Sm3Hash;
-import org.tron.keystore.StringUtils;
-import org.tron.protos.Contract.*;
+import org.tron.core.config.Parameter;
+import org.tron.core.exception.EncodingException;
+import org.tron.protos.Contract.AccountCreateContract;
+import org.tron.protos.Contract.AccountPermissionUpdateContract;
+import org.tron.protos.Contract.AccountUpdateContract;
+import org.tron.protos.Contract.AssetIssueContract;
+import org.tron.protos.Contract.CreateSmartContract;
+import org.tron.protos.Contract.ExchangeCreateContract;
+import org.tron.protos.Contract.ExchangeInjectContract;
+import org.tron.protos.Contract.ExchangeTransactionContract;
+import org.tron.protos.Contract.ExchangeWithdrawContract;
+import org.tron.protos.Contract.FreezeBalanceContract;
+import org.tron.protos.Contract.ParticipateAssetIssueContract;
+import org.tron.protos.Contract.ProposalApproveContract;
+import org.tron.protos.Contract.ProposalCreateContract;
+import org.tron.protos.Contract.ProposalDeleteContract;
+import org.tron.protos.Contract.ShieldedTransferContract;
+import org.tron.protos.Contract.TransferAssetContract;
+import org.tron.protos.Contract.TransferContract;
+import org.tron.protos.Contract.TriggerSmartContract;
+import org.tron.protos.Contract.UnfreezeAssetContract;
+import org.tron.protos.Contract.UnfreezeBalanceContract;
+import org.tron.protos.Contract.UpdateAssetContract;
+import org.tron.protos.Contract.UpdateBrokerageContract;
+import org.tron.protos.Contract.UpdateEnergyLimitContract;
+import org.tron.protos.Contract.UpdateSettingContract;
+import org.tron.protos.Contract.VoteAssetContract;
+import org.tron.protos.Contract.VoteWitnessContract;
+import org.tron.protos.Contract.WithdrawBalanceContract;
+import org.tron.protos.Contract.WitnessCreateContract;
+import org.tron.protos.Contract.WitnessUpdateContract;
 import org.tron.protos.Protocol.Block;
 import org.tron.protos.Protocol.Transaction;
-import org.tron.walletserver.WalletApi;
 
-import java.io.Console;
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.Charset;
 import java.security.SecureRandom;
 import java.text.ParsePosition;
 import java.text.SimpleDateFormat;
-import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.Scanner;
 
 public class Utils {
+  public static final byte PREFIX_BYTE_FOR_MAINNET = (byte) 0x41;
+
   public static final String PERMISSION_ID = "Permission_id";
   public static final String VISIBLE = "visible";
   public static final String TRANSACTION = "transaction";
@@ -190,54 +226,6 @@ public class Utils {
         printTransactionToJSON(transactionApprovedList.getTransaction().getTransaction(), true));
     jsonObject.put(TRANSACTION, jsonObjectExt);
     return JsonFormatUtil.formatJson(jsonObject.toJSONString());
-  }
-
-  public static char[] inputPassword2Twice() throws IOException {
-    char[] password0;
-    while (true) {
-      System.out.println("Please input password.");
-      password0 = Utils.inputPassword(true);
-      System.out.println("Please input password again.");
-      char[] password1 = Utils.inputPassword(true);
-      boolean flag = Arrays.equals(password0, password1);
-      StringUtils.clear(password1);
-      if (flag) {
-        break;
-      }
-      System.out.println("The passwords do not match, please input again.");
-    }
-    return password0;
-  }
-
-  public static char[] inputPassword(boolean checkStrength) throws IOException {
-    char[] password;
-    Console cons = System.console();
-    while (true) {
-      if (cons != null) {
-        password = cons.readPassword("password: ");
-      } else {
-        byte[] passwd0 = new byte[64];
-        int len = System.in.read(passwd0, 0, passwd0.length);
-        int i;
-        for (i = 0; i < len; i++) {
-          if (passwd0[i] == 0x09 || passwd0[i] == 0x0A) {
-            break;
-          }
-        }
-        byte[] passwd1 = Arrays.copyOfRange(passwd0, 0, i);
-        password = StringUtils.byte2Char(passwd1);
-        StringUtils.clear(passwd0);
-        StringUtils.clear(passwd1);
-      }
-      if (WalletApi.passwordValid(password)) {
-        return password;
-      }
-      if (!checkStrength) {
-        return password;
-      }
-      StringUtils.clear(password);
-      System.out.println("Invalid password, please input again.");
-    }
   }
 
   public static byte[] generateContractAddress(Transaction trx, byte[] ownerAddress) {
@@ -581,5 +569,71 @@ public class Utils {
     } catch (Exception e) {
     }
     return bRet;
+  }
+
+  public static String encode58Check(byte[] input) {
+    byte[] hash0 = Sha256Sm3Hash.hash(input);
+    byte[] hash1 = Sha256Sm3Hash.hash(hash0);
+    byte[] inputCheck = new byte[input.length + 4];
+    System.arraycopy(input, 0, inputCheck, 0, input.length);
+    System.arraycopy(hash1, 0, inputCheck, input.length, 4);
+    return Base58.encode(inputCheck);
+  }
+
+  private static byte[] decode58Check(String input) {
+    byte[] decodeCheck = Base58.decode(input);
+    if (decodeCheck.length <= 4) {
+      return null;
+    }
+    byte[] decodeData = new byte[decodeCheck.length - 4];
+    System.arraycopy(decodeCheck, 0, decodeData, 0, decodeData.length);
+    byte[] hash0 = Sha256Sm3Hash.hash(decodeData);
+    byte[] hash1 = Sha256Sm3Hash.hash(hash0);
+    if (hash1[0] == decodeCheck[decodeData.length]
+            && hash1[1] == decodeCheck[decodeData.length + 1]
+            && hash1[2] == decodeCheck[decodeData.length + 2]
+            && hash1[3] == decodeCheck[decodeData.length + 3]) {
+      return decodeData;
+    }
+    return null;
+  }
+
+  public static byte[] decodeFromBase58Check(String addressBase58) {
+    if (StringUtils.isEmpty(addressBase58)) {
+      throw new EncodingException("Warning: Address is empty !!");
+    }
+    byte[] address = decode58Check(addressBase58);
+    if (address == null) {
+      throw new EncodingException(String.format("Address %s not valid", addressBase58));
+    }
+    if (!addressValid(address)) {
+      throw new EncodingException(String.format("Address %s not valid", addressBase58));
+    }
+    return address;
+  }
+
+  public static boolean addressValid(byte[] address) {
+    if (ArrayUtils.isEmpty(address)) {
+      throw new EncodingException("Warning: Address is empty !!");
+    }
+    if (address.length != Parameter.CommonConstant.ADDRESS_SIZE) {
+      throw new EncodingException(
+              "Warning: Address length need "
+                      + Parameter.CommonConstant.ADDRESS_SIZE
+                      + " but "
+                      + address.length
+                      + " !!");
+    }
+    byte preFixbyte = address[0];
+    if (preFixbyte != PREFIX_BYTE_FOR_MAINNET) {
+      throw new EncodingException(
+              "Warning: Address need prefix with "
+                      + PREFIX_BYTE_FOR_MAINNET
+                      + " but "
+                      + preFixbyte
+                      + " !!");
+    }
+    // Other rule;
+    return true;
   }
 }

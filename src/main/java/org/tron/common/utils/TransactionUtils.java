@@ -15,28 +15,18 @@
 
 package org.tron.common.utils;
 
-import com.google.protobuf.Any;
 import com.google.protobuf.ByteString;
-import org.tron.api.GrpcAPI;
 import org.tron.common.crypto.ECKey;
 import org.tron.common.crypto.ECKey.ECDSASignature;
-import org.tron.common.crypto.Sha256Hash;
 import org.tron.common.crypto.Sha256Sm3Hash;
 import org.tron.common.crypto.SignInterface;
 import org.tron.common.crypto.SignatureInterface;
 import org.tron.core.exception.CancelException;
-import org.tron.core.exception.EncodingException;
-import org.tron.core.exception.TransactionException;
-import org.tron.protos.Contract;
-import org.tron.protos.Protocol;
 import org.tron.protos.Protocol.Transaction;
-import org.tron.walletserver.GrpcClientHolder;
-import org.tron.walletserver.WalletApi;
 
 import java.security.SignatureException;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Objects;
 import java.util.Scanner;
 
 public class TransactionUtils {
@@ -293,111 +283,13 @@ public class TransactionUtils {
     }
   }
 
-    /**
-     * @author Evgeniy Melnikov (e.melnikov@unitedtraders.com)
-     */
-    public static Transaction send(String from, String to, long amount, ECKey privateKey) throws TransactionException {
-        Transaction transactionSigned = signTransactionOffline(Objects.requireNonNull(createRawTransaction(from, to, amount)), privateKey);
-        return broadcastTransaction(transactionSigned);
-    }
+  public static Transaction signTransactionOffline(Transaction transaction, String privateKey) {
+    byte[] privKeyBytes = org.tron.common.utils.ByteArray.fromHexString(privateKey);
+    ECKey myKey = ECKey.fromPrivate(privKeyBytes);
+    return signTransactionOffline(transaction, myKey);
+  }
 
-    public static Transaction createRawTransaction(String from, String to, long amount) {
-        byte[] fromByte = WalletApi.decodeFromBase58Check(from);
-        byte[] toByte = WalletApi.decodeFromBase58Check(to);
-
-        Transaction.Builder transactionBuilder = Transaction.newBuilder();
-        Protocol.Block newestBlock = WalletApi.getBlock(-1);
-
-        Transaction.Contract.Builder contractBuilder = Transaction.Contract.newBuilder();
-        Contract.TransferContract.Builder transferContractBuilder = Contract.TransferContract
-                .newBuilder();
-        transferContractBuilder.setAmount(amount);
-        ByteString bsTo = ByteString.copyFrom(toByte);
-        ByteString bsOwner = ByteString.copyFrom(fromByte);
-        transferContractBuilder.setToAddress(bsTo);
-        transferContractBuilder.setOwnerAddress(bsOwner);
-        try {
-            Any any = Any.pack(transferContractBuilder.build());
-            contractBuilder.setParameter(any);
-        } catch (Exception e) {
-            return null;
-        }
-        contractBuilder.setType(Transaction.Contract.ContractType.TransferContract);
-        transactionBuilder.getRawDataBuilder().addContract(contractBuilder)
-                .setTimestamp(System.currentTimeMillis())
-                .setExpiration(newestBlock.getBlockHeader().getRawData().getTimestamp() + 10 * 60 * 60 * 1000);
-        Transaction transaction = transactionBuilder.build();
-        Transaction refTransaction = setReference(transaction, newestBlock);
-        return refTransaction;
-    }
-
-    public static GrpcAPI.TransactionExtention signTransaction(Transaction rawTransaction, ECKey privateKey) {
-        return signTransactionByApi2(rawTransaction, privateKey.getPrivKeyBytes());
-    }
-
-    public static Transaction signTransactionOffline(Transaction transaction, String privateKey) {
-        byte[] privKeyBytes = org.tron.common.utils.ByteArray.fromHexString(privateKey);
-        ECKey myKey = ECKey.fromPrivate(privKeyBytes);
-        return signTransactionOffline(transaction, myKey);
-    }
-
-    public static Transaction signTransactionOffline(Transaction transaction, ECKey privateKey) {
-        Transaction.Builder transactionBuilderSigned = transaction.toBuilder();
-        byte[] hash = Sha256Sm3Hash.hash(transaction.getRawData().toByteArray());
-        SignatureInterface signature = privateKey.sign(hash);
-        ByteString bsSign = ByteString.copyFrom(signature.toByteArray());
-        transactionBuilderSigned.addSignature(bsSign);
-        transaction = transactionBuilderSigned.build();
-        return transaction;
-    }
-
-    public static Transaction broadcastTransaction(Transaction transactionSigned) {
-        GrpcAPI.TransactionSignWeight weight = WalletApi.getTransactionSignWeight(transactionSigned);
-
-        if (weight.getResult().getCode() == GrpcAPI.TransactionSignWeight.Result.response_code.NOT_ENOUGH_PERMISSION) {
-            throw new TransactionException(String.format("Current signWeight is: %s. Get error with response code: %s",
-                    Utils.printTransactionSignWeight(weight), GrpcAPI.TransactionSignWeight.Result.response_code.NOT_ENOUGH_PERMISSION.name()),
-                    weight.getResult().getCode().name(), weight.getResult().getCode().getNumber()
-            );
-        }
-
-        boolean broadcastTransaction = GrpcClientHolder.getGrpcClient().broadcastTransaction(transactionSigned);
-        if (!broadcastTransaction) {
-            throw new TransactionException("Something gone wrong. Status false after broadcast transaction.", "OTHER_ERROR", 20);
-        }
-        return transactionSigned;
-    }
-
-    public static Transaction setReference(Transaction transaction, Protocol.Block newestBlock) {
-        long blockHeight = newestBlock.getBlockHeader().getRawData().getNumber();
-        byte[] blockHash = getBlockHash(newestBlock).getBytes();
-        byte[] refBlockNum = ByteArray.fromLong(blockHeight);
-        Transaction.raw rawData = transaction.getRawData().toBuilder()
-                .setRefBlockHash(ByteString.copyFrom(ByteArray.subArray(blockHash, 8, 16)))
-                .setRefBlockBytes(ByteString.copyFrom(ByteArray.subArray(refBlockNum, 6, 8)))
-                .build();
-        return transaction.toBuilder().setRawData(rawData).build();
-    }
-
-    public static Sha256Hash getBlockHash(Protocol.Block block) {
-        return Sha256Hash.of(block.getBlockHeader().getRawData().toByteArray());
-    }
-
-    public static GrpcAPI.TransactionExtention signTransactionByApi2(
-            Transaction transaction, byte[] privateKey) {
-        transaction = TransactionUtils.setExpirationTime(transaction);
-        Protocol.TransactionSign.Builder builder = Protocol.TransactionSign.newBuilder();
-        builder.setPrivateKey(ByteString.copyFrom(privateKey));
-        builder.setTransaction(transaction);
-        return GrpcClientHolder.getGrpcClient().signTransaction2(builder.build());
-    }
-
-    public static boolean validateAddress(String address) {
-        try {
-            WalletApi.decodeFromBase58Check(address);
-        } catch (EncodingException ex) {
-            return false;
-        }
-        return true;
-    }
+  public static Transaction signTransactionOffline(Transaction transaction, ECKey privateKey) {
+    return TransactionUtils.sign(transaction, privateKey);
+  }
 }

@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
 import org.spongycastle.util.encoders.Hex;
 import org.tron.common.crypto.Hash;
-import org.tron.walletserver.WalletApi;
+import org.tron.walletserver.GrpcClient;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -203,10 +203,7 @@ public class AbiUtil {
 
     @Override
     byte[] encode(String value) {
-      byte[] address = WalletApi.decodeFromBase58Check(value);
-      if (address == null) {
-        return null;
-      }
+      byte[] address = Utils.decodeFromBase58Check(value);
       return new DataWord(address).getData();
     }
 

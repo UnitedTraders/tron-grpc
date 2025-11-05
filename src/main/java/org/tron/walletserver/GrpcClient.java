@@ -1,14 +1,12 @@
 package org.tron.walletserver;
 
+import com.google.protobuf.Any;
 import com.google.protobuf.ByteString;
-import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ArrayUtils;
-import org.apache.commons.lang3.StringUtils;
 import org.bouncycastle.util.encoders.Hex;
+import org.tron.api.GrpcAPI;
 import org.tron.api.GrpcAPI.AccountNetMessage;
-import org.tron.api.GrpcAPI.AccountPaginated;
 import org.tron.api.GrpcAPI.AccountResourceMessage;
 import org.tron.api.GrpcAPI.AddressPrKeyPairMessage;
 import org.tron.api.GrpcAPI.AssetIssueList;
@@ -22,11 +20,6 @@ import org.tron.api.GrpcAPI.DecryptNotesMarked;
 import org.tron.api.GrpcAPI.DelegatedResourceList;
 import org.tron.api.GrpcAPI.DelegatedResourceMessage;
 import org.tron.api.GrpcAPI.DiversifierMessage;
-import org.tron.api.GrpcAPI.EasyTransferAssetByPrivateMessage;
-import org.tron.api.GrpcAPI.EasyTransferAssetMessage;
-import org.tron.api.GrpcAPI.EasyTransferByPrivateMessage;
-import org.tron.api.GrpcAPI.EasyTransferMessage;
-import org.tron.api.GrpcAPI.EasyTransferResponse;
 import org.tron.api.GrpcAPI.EmptyMessage;
 import org.tron.api.GrpcAPI.ExchangeList;
 import org.tron.api.GrpcAPI.ExpandedSpendingKeyMessage;
@@ -50,18 +43,16 @@ import org.tron.api.GrpcAPI.SpendAuthSigParameters;
 import org.tron.api.GrpcAPI.SpendResult;
 import org.tron.api.GrpcAPI.TransactionApprovedList;
 import org.tron.api.GrpcAPI.TransactionExtention;
-import org.tron.api.GrpcAPI.TransactionList;
-import org.tron.api.GrpcAPI.TransactionListExtention;
 import org.tron.api.GrpcAPI.TransactionSignWeight;
 import org.tron.api.GrpcAPI.ViewingKeyMessage;
 import org.tron.api.GrpcAPI.WitnessList;
-import org.tron.api.WalletExtensionGrpc;
 import org.tron.api.WalletGrpc;
-import org.tron.api.WalletSolidityGrpc;
 import org.tron.common.crypto.ECKey;
+import org.tron.common.crypto.Sha256Hash;
 import org.tron.common.utils.AbiUtil;
 import org.tron.common.utils.ByteArray;
 import org.tron.common.utils.TransactionUtils;
+import org.tron.common.utils.Utils;
 import org.tron.core.exception.TransactionException;
 import org.tron.protos.Contract;
 import org.tron.protos.Contract.IncrementalMerkleVoucherInfo;
@@ -76,7 +67,6 @@ import org.tron.protos.Protocol.Proposal;
 import org.tron.protos.Protocol.SmartContract;
 import org.tron.protos.Protocol.Transaction;
 import org.tron.protos.Protocol.TransactionInfo;
-import org.tron.protos.Protocol.TransactionSign;
 
 import javax.annotation.Nullable;
 import java.math.BigInteger;
@@ -87,487 +77,354 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.TimeUnit;
 
 import static org.tron.common.crypto.Sha256Sm3Hash.newDigest;
+import static org.tron.common.utils.TransactionUtils.signTransactionOffline;
+import static org.tron.common.utils.Utils.decodeFromBase58Check;
 
+/**
+ * Initialization in kotlin
+ *
+ * <pre>
+ * {@code
+ * GrpcClient(
+ *         WalletGrpc.newBlockingStub(clientUrl.let {
+ *             (if (it.startsWith("https://")) {
+ *                 ManagedChannelBuilder.forTarget(clientUrl.removePrefix("https://"))
+ *             } else {
+ *                 ManagedChannelBuilder.forTarget(clientUrl)
+ *                     .usePlaintext()
+ *             }).build()
+ *         }).let {
+ *             if (tronProApiKey.isNullOrBlank()) {
+ *                 it
+ *             } else {
+ *                 MetadataUtils.attachHeaders(it, Metadata().apply {
+ *                     val key = Metadata.Key.of("TRON-PRO-API-KEY", Metadata.ASCII_STRING_MARSHALLER)
+ *                     put(key, tronProApiKey)
+ *                 })
+ *             }
+ *         }
+ *     )
+ * }
+ * </pre>
+ */
 @Slf4j
 public class GrpcClient {
+    private final WalletGrpc.WalletBlockingStub blockingStubFull;
 
-  private ManagedChannel channelFull = null;
-  private ManagedChannel channelSolidity = null;
-  private WalletGrpc.WalletBlockingStub blockingStubFull = null;
-  private WalletSolidityGrpc.WalletSolidityBlockingStub blockingStubSolidity = null;
-  private WalletExtensionGrpc.WalletExtensionBlockingStub blockingStubExtension = null;
-
-//  public GrpcClient(String host, int port) {
-//    channel = ManagedChannelBuilder.forAddress(host, port)
-//        .usePlaintext(true)
-//        .build();
-//    blockingStub = WalletGrpc.newBlockingStub(channel);
-//  }
-
-  public GrpcClient(
-          WalletGrpc.WalletBlockingStub blockingStubFull,
-          @Nullable WalletSolidityGrpc.WalletSolidityBlockingStub blockingStubSolidity,
-          @Nullable WalletExtensionGrpc.WalletExtensionBlockingStub blockingStubExtension
-  ) {
-    this.blockingStubFull = blockingStubFull;
-    this.blockingStubSolidity = blockingStubSolidity;
-    this.blockingStubExtension = blockingStubExtension;
-    initStatics();
-  }
-
-  public GrpcClient(
-          String fullnode,
-          String soliditynode,
-          @Deprecated boolean isTestNet
-  ) {
-    if (!StringUtils.isEmpty(fullnode)) {
-      channelFull = ManagedChannelBuilder.forTarget(fullnode)
-          .usePlaintext()
-          .build();
-      blockingStubFull = WalletGrpc.newBlockingStub(channelFull);
-    }
-    if (!StringUtils.isEmpty(soliditynode)) {
-      channelSolidity = ManagedChannelBuilder.forTarget(soliditynode)
-          .usePlaintext()
-          .build();
-      blockingStubSolidity = WalletSolidityGrpc.newBlockingStub(channelSolidity);
-      blockingStubExtension = WalletExtensionGrpc.newBlockingStub(channelSolidity);
+    public GrpcClient(
+            WalletGrpc.WalletBlockingStub blockingStubFull
+    ) {
+        this.blockingStubFull = blockingStubFull;
     }
 
-    initStatics();
-  }
-
-  private void initStatics() {
-    GrpcClientHolder.setGrpcClient(this);
-//    if (isTestNet) {
-//        GrpcClientHolder.setPrefix((byte) 0xa0);
-//    } else {
-//        GrpcClientHolder.setPrefix((byte) 0x41);
-//    }
-
-    // несмотря на testnet prefix 0x41 (65)
-    GrpcClientHolder.setPrefix((byte) 0x41);
-  }
-
-  public void shutdown() throws InterruptedException {
-    if (channelFull != null) {
-      channelFull.shutdown().awaitTermination(5, TimeUnit.SECONDS);
-    }
-    if (channelSolidity != null) {
-      channelSolidity.shutdown().awaitTermination(5, TimeUnit.SECONDS);
-    }
-  }
-
-  public Account queryAccount(byte[] address) {
-    ByteString addressBS = ByteString.copyFrom(address);
-    Account request = Account.newBuilder().setAddress(addressBS).build();
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.getAccount(request);
-    } else {
-      return blockingStubFull.getAccount(request);
-    }
-  }
-
-  public Account queryAccountById(String accountId) {
-    ByteString bsAccountId = ByteString.copyFromUtf8(accountId);
-    Account request = Account.newBuilder().setAccountId(bsAccountId).build();
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.getAccountById(request);
-    } else {
-      return blockingStubFull.getAccountById(request);
-    }
-  }
-
-  //Warning: do not invoke this interface provided by others.
-  public Transaction signTransaction(TransactionSign transactionSign) {
-    return blockingStubFull.getTransactionSign(transactionSign);
-  }
-
-  //Warning: do not invoke this interface provided by others.
-  public TransactionExtention signTransaction2(TransactionSign transactionSign) {
-    return blockingStubFull.getTransactionSign2(transactionSign);
-  }
-
-  //Warning: do not invoke this interface provided by others.
-  public TransactionExtention addSign(TransactionSign transactionSign) {
-    return blockingStubFull.addSign(transactionSign);
-  }
-
-  public TransactionSignWeight getTransactionSignWeight(Transaction transaction) {
-    return blockingStubFull.getTransactionSignWeight(transaction);
-  }
-
-  public TransactionApprovedList getTransactionApprovedList(Transaction transaction) {
-    return blockingStubFull.getTransactionApprovedList(transaction);
-  }
-
-  //Warning: do not invoke this interface provided by others.
-  public byte[] createAddress(byte[] passPhrase) {
-    BytesMessage.Builder builder = BytesMessage.newBuilder();
-    builder.setValue(ByteString.copyFrom(passPhrase));
-
-    BytesMessage result = blockingStubFull.createAddress(builder.build());
-    return result.getValue().toByteArray();
-  }
-
-  //Warning: do not invoke this interface provided by others.
-  public EasyTransferResponse easyTransfer(byte[] passPhrase, byte[] toAddress, long amount) {
-    EasyTransferMessage.Builder builder = EasyTransferMessage.newBuilder();
-    builder.setPassPhrase(ByteString.copyFrom(passPhrase));
-    builder.setToAddress(ByteString.copyFrom(toAddress));
-    builder.setAmount(amount);
-
-    return blockingStubFull.easyTransfer(builder.build());
-  }
-
-  //Warning: do not invoke this interface provided by others.
-  public EasyTransferResponse easyTransferByPrivate(byte[] privateKey, byte[] toAddress,
-      long amount) {
-    EasyTransferByPrivateMessage.Builder builder = EasyTransferByPrivateMessage.newBuilder();
-    builder.setPrivateKey(ByteString.copyFrom(privateKey));
-    builder.setToAddress(ByteString.copyFrom(toAddress));
-    builder.setAmount(amount);
-
-    return blockingStubFull.easyTransferByPrivate(builder.build());
-  }
-
-  //Warning: do not invoke this interface provided by others.
-  public EasyTransferResponse easyTransferAsset(byte[] passPhrase, byte[] toAddress,
-      String assetId, long amount) {
-    EasyTransferAssetMessage.Builder builder = EasyTransferAssetMessage.newBuilder();
-    builder.setPassPhrase(ByteString.copyFrom(passPhrase));
-    builder.setToAddress(ByteString.copyFrom(toAddress));
-    builder.setAssetId(assetId);
-    builder.setAmount(amount);
-
-    return blockingStubFull.easyTransferAsset(builder.build());
-  }
-
-  //Warning: do not invoke this interface provided by others.
-  public EasyTransferResponse easyTransferAssetByPrivate(byte[] privateKey, byte[] toAddress,
-      String assetId, long amount) {
-    EasyTransferAssetByPrivateMessage.Builder builder = EasyTransferAssetByPrivateMessage
-        .newBuilder();
-    builder.setPrivateKey(ByteString.copyFrom(privateKey));
-    builder.setToAddress(ByteString.copyFrom(toAddress));
-    builder.setAssetId(assetId);
-    builder.setAmount(amount);
-
-    return blockingStubFull.easyTransferAssetByPrivate(builder.build());
-  }
-
-  public Transaction createTransaction(Contract.AccountUpdateContract contract) {
-    return blockingStubFull.updateAccount(contract);
-  }
-
-  public TransactionExtention createTransaction2(Contract.AccountUpdateContract contract) {
-    return blockingStubFull.updateAccount2(contract);
-  }
-
-  public Transaction createTransaction(Contract.SetAccountIdContract contract) {
-    return blockingStubFull.setAccountId(contract);
-  }
-
-  public Transaction createTransaction(Contract.UpdateAssetContract contract) {
-    return blockingStubFull.updateAsset(contract);
-  }
-
-  public TransactionExtention createTransaction2(Contract.UpdateAssetContract contract) {
-    return blockingStubFull.updateAsset2(contract);
-  }
-
-  public Transaction createTransaction(Contract.TransferContract contract) {
-    return blockingStubFull.createTransaction(contract);
-  }
-
-  public TransactionExtention createTransaction2(Contract.TransferContract contract) {
-    return blockingStubFull.createTransaction2(contract);
-  }
-
-  public Transaction createTransaction(Contract.FreezeBalanceContract contract) {
-    return blockingStubFull.freezeBalance(contract);
-  }
-
-  public TransactionExtention createTransaction(Contract.BuyStorageContract contract) {
-    return blockingStubFull.buyStorage(contract);
-  }
-
-  public TransactionExtention createTransaction(Contract.BuyStorageBytesContract contract) {
-    return blockingStubFull.buyStorageBytes(contract);
-  }
-
-  public TransactionExtention createTransaction(Contract.SellStorageContract contract) {
-    return blockingStubFull.sellStorage(contract);
-  }
-
-  public TransactionExtention createTransaction2(Contract.FreezeBalanceContract contract) {
-    return blockingStubFull.freezeBalance2(contract);
-  }
-
-  public Transaction createTransaction(Contract.WithdrawBalanceContract contract) {
-    return blockingStubFull.withdrawBalance(contract);
-  }
-
-  public TransactionExtention createTransaction2(Contract.WithdrawBalanceContract contract) {
-    return blockingStubFull.withdrawBalance2(contract);
-  }
-
-  public Transaction createTransaction(Contract.UnfreezeBalanceContract contract) {
-    return blockingStubFull.unfreezeBalance(contract);
-  }
-
-  public TransactionExtention createTransaction2(Contract.UnfreezeBalanceContract contract) {
-    return blockingStubFull.unfreezeBalance2(contract);
-  }
-
-  public Transaction createTransaction(Contract.UnfreezeAssetContract contract) {
-    return blockingStubFull.unfreezeAsset(contract);
-  }
-
-  public TransactionExtention createTransaction2(Contract.UnfreezeAssetContract contract) {
-    return blockingStubFull.unfreezeAsset2(contract);
-  }
-
-  public Transaction createTransferAssetTransaction(Contract.TransferAssetContract contract) {
-    return blockingStubFull.transferAsset(contract);
-  }
-
-  public TransactionExtention createTransferAssetTransaction2(
-      Contract.TransferAssetContract contract) {
-    return blockingStubFull.transferAsset2(contract);
-  }
-
-  public Transaction createParticipateAssetIssueTransaction(
-      Contract.ParticipateAssetIssueContract contract) {
-    return blockingStubFull.participateAssetIssue(contract);
-  }
-
-  public TransactionExtention createParticipateAssetIssueTransaction2(
-      Contract.ParticipateAssetIssueContract contract) {
-    return blockingStubFull.participateAssetIssue2(contract);
-  }
-
-  public Transaction createAssetIssue(Contract.AssetIssueContract contract) {
-    return blockingStubFull.createAssetIssue(contract);
-  }
-
-  public TransactionExtention createAssetIssue2(Contract.AssetIssueContract contract) {
-    return blockingStubFull.createAssetIssue2(contract);
-  }
-
-  public Transaction voteWitnessAccount(Contract.VoteWitnessContract contract) {
-    return blockingStubFull.voteWitnessAccount(contract);
-  }
-
-  public TransactionExtention voteWitnessAccount2(Contract.VoteWitnessContract contract) {
-    return blockingStubFull.voteWitnessAccount2(contract);
-  }
-
-  public TransactionExtention proposalCreate(Contract.ProposalCreateContract contract) {
-    return blockingStubFull.proposalCreate(contract);
-  }
-
-  public Optional<ProposalList> listProposals() {
-    ProposalList proposalList = blockingStubFull.listProposals(EmptyMessage.newBuilder().build());
-    return Optional.ofNullable(proposalList);
-  }
-
-  public Optional<Proposal> getProposal(String id) {
-    BytesMessage request = BytesMessage.newBuilder().setValue(ByteString.copyFrom(
-        ByteArray.fromLong(Long.parseLong(id))))
-        .build();
-    Proposal proposal = blockingStubFull.getProposalById(request);
-    return Optional.ofNullable(proposal);
-  }
-
-  public Optional<DelegatedResourceList> getDelegatedResource(String fromAddress,
-      String toAddress) {
-
-    ByteString fromAddressBS = ByteString.copyFrom(
-        Objects.requireNonNull(WalletApi.decodeFromBase58Check(fromAddress)));
-    ByteString toAddressBS = ByteString.copyFrom(
-        Objects.requireNonNull(WalletApi.decodeFromBase58Check(toAddress)));
-
-    DelegatedResourceMessage request = DelegatedResourceMessage.newBuilder()
-        .setFromAddress(fromAddressBS)
-        .setToAddress(toAddressBS)
-        .build();
-    DelegatedResourceList delegatedResource = blockingStubFull
-        .getDelegatedResource(request);
-    return Optional.ofNullable(delegatedResource);
-  }
-
-  public Optional<DelegatedResourceAccountIndex> getDelegatedResourceAccountIndex(String address) {
-
-    ByteString addressBS = ByteString.copyFrom(
-        Objects.requireNonNull(WalletApi.decodeFromBase58Check(address)));
-
-    BytesMessage bytesMessage = BytesMessage.newBuilder().setValue(addressBS).build();
-
-    DelegatedResourceAccountIndex accountIndex = blockingStubFull
-        .getDelegatedResourceAccountIndex(bytesMessage);
-    return Optional.ofNullable(accountIndex);
-  }
-
-
-  public Optional<ExchangeList> listExchanges() {
-    ExchangeList exchangeList;
-    if (blockingStubSolidity != null) {
-      exchangeList = blockingStubSolidity.listExchanges(EmptyMessage.newBuilder().build());
-    } else {
-      exchangeList = blockingStubFull.listExchanges(EmptyMessage.newBuilder().build());
+    public Account queryAccount(byte[] address) {
+        ByteString addressBS = ByteString.copyFrom(address);
+        Account request = Account.newBuilder().setAddress(addressBS).build();
+        return blockingStubFull.getAccount(request);
     }
 
-    return Optional.ofNullable(exchangeList);
-  }
-
-  public Optional<Exchange> getExchange(String id) {
-    BytesMessage request = BytesMessage.newBuilder().setValue(ByteString.copyFrom(
-        ByteArray.fromLong(Long.parseLong(id))))
-        .build();
-
-    Exchange exchange;
-    if (blockingStubSolidity != null) {
-      exchange = blockingStubSolidity.getExchangeById(request);
-    } else {
-      exchange = blockingStubFull.getExchangeById(request);
+    public Account queryAccountById(String accountId) {
+        ByteString bsAccountId = ByteString.copyFromUtf8(accountId);
+        Account request = Account.newBuilder().setAccountId(bsAccountId).build();
+        return blockingStubFull.getAccountById(request);
     }
 
-    return Optional.ofNullable(exchange);
-  }
-
-  public Optional<ChainParameters> getChainParameters() {
-    ChainParameters chainParameters = blockingStubFull
-        .getChainParameters(EmptyMessage.newBuilder().build());
-    return Optional.ofNullable(chainParameters);
-  }
-
-  public TransactionExtention proposalApprove(Contract.ProposalApproveContract contract) {
-    return blockingStubFull.proposalApprove(contract);
-  }
-
-  public TransactionExtention proposalDelete(Contract.ProposalDeleteContract contract) {
-    return blockingStubFull.proposalDelete(contract);
-  }
-
-  public TransactionExtention exchangeCreate(Contract.ExchangeCreateContract contract) {
-    return blockingStubFull.exchangeCreate(contract);
-  }
-
-  public TransactionExtention exchangeInject(Contract.ExchangeInjectContract contract) {
-    return blockingStubFull.exchangeInject(contract);
-  }
-
-  public TransactionExtention exchangeWithdraw(Contract.ExchangeWithdrawContract contract) {
-    return blockingStubFull.exchangeWithdraw(contract);
-  }
-
-  public TransactionExtention exchangeTransaction(Contract.ExchangeTransactionContract contract) {
-    return blockingStubFull.exchangeTransaction(contract);
-  }
-
-  public Transaction createAccount(Contract.AccountCreateContract contract) {
-    return blockingStubFull.createAccount(contract);
-  }
-
-  public TransactionExtention createAccount2(Contract.AccountCreateContract contract) {
-    return blockingStubFull.createAccount2(contract);
-  }
-
-  public AddressPrKeyPairMessage generateAddress(EmptyMessage emptyMessage) {
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.generateAddress(emptyMessage);
-    } else {
-      return blockingStubFull.generateAddress(emptyMessage);
+    public TransactionSignWeight getTransactionSignWeight(Transaction transaction) {
+        return blockingStubFull.getTransactionSignWeight(transaction);
     }
-  }
 
-  public Transaction createWitness(Contract.WitnessCreateContract contract) {
-    return blockingStubFull.createWitness(contract);
-  }
-
-  public TransactionExtention createWitness2(Contract.WitnessCreateContract contract) {
-    return blockingStubFull.createWitness2(contract);
-  }
-
-  public Transaction updateWitness(Contract.WitnessUpdateContract contract) {
-    return blockingStubFull.updateWitness(contract);
-  }
-
-  public TransactionExtention updateWitness2(Contract.WitnessUpdateContract contract) {
-    return blockingStubFull.updateWitness2(contract);
-  }
-
-  public boolean broadcastTransaction(Transaction signaturedTransaction) {
-    int i = 10;
-    Return response = blockingStubFull.broadcastTransaction(signaturedTransaction);
-    while (!response.getResult() && response.getCode() == response_code.SERVER_BUSY
-        && i > 0) {
-      i--;
-      response = blockingStubFull.broadcastTransaction(signaturedTransaction);
-      System.out.println("repeat times = " + (11 - i));
-      try {
-        Thread.sleep(1000);
-      } catch (InterruptedException e) {
-        e.printStackTrace();
-      }
+    public TransactionApprovedList getTransactionApprovedList(Transaction transaction) {
+        return blockingStubFull.getTransactionApprovedList(transaction);
     }
-    if (!response.getResult()) {
-      throw new TransactionException(
-              "Code = " + response.getCode().name() + " " + response.getCode().getNumber() + "; Message = " + response.getMessage().toStringUtf8(),
-              response.getCode().name(),
-              response.getCode().getNumber()
-      );
-    }
-    return true;
-  }
 
-  public Block getBlock(long blockNum) {
-    if (blockNum < 0) {
-      if (blockingStubSolidity != null) {
-        return blockingStubSolidity.getNowBlock(EmptyMessage.newBuilder().build());
-      } else {
-        return blockingStubFull.getNowBlock(EmptyMessage.newBuilder().build());
-      }
+    public Transaction createTransaction(Contract.AccountUpdateContract contract) {
+        return blockingStubFull.updateAccount(contract);
     }
-    NumberMessage.Builder builder = NumberMessage.newBuilder();
-    builder.setNum(blockNum);
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.getBlockByNum(builder.build());
-    } else {
-      return blockingStubFull.getBlockByNum(builder.build());
-    }
-  }
 
-  public long getTransactionCountByBlockNum(long blockNum) {
-    NumberMessage.Builder builder = NumberMessage.newBuilder();
-    builder.setNum(blockNum);
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.getTransactionCountByBlockNum(builder.build()).getNum();
-    } else {
-      return blockingStubFull.getTransactionCountByBlockNum(builder.build()).getNum();
+    public TransactionExtention createTransaction2(Contract.AccountUpdateContract contract) {
+        return blockingStubFull.updateAccount2(contract);
     }
-  }
 
-  public BlockExtention getBlock2(long blockNum) {
-    if (blockNum < 0) {
-      if (blockingStubSolidity != null) {
-        return blockingStubSolidity.getNowBlock2(EmptyMessage.newBuilder().build());
-      } else {
-        return blockingStubFull.getNowBlock2(EmptyMessage.newBuilder().build());
-      }
+    public Transaction createTransaction(Contract.SetAccountIdContract contract) {
+        return blockingStubFull.setAccountId(contract);
     }
-    NumberMessage.Builder builder = NumberMessage.newBuilder();
-    builder.setNum(blockNum);
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.getBlockByNum2(builder.build());
-    } else {
-      return blockingStubFull.getBlockByNum2(builder.build());
+
+    public Transaction createTransaction(Contract.UpdateAssetContract contract) {
+        return blockingStubFull.updateAsset(contract);
     }
-  }
+
+    public TransactionExtention createTransaction2(Contract.UpdateAssetContract contract) {
+        return blockingStubFull.updateAsset2(contract);
+    }
+
+    public Transaction createTransaction(Contract.TransferContract contract) {
+        return blockingStubFull.createTransaction(contract);
+    }
+
+    public TransactionExtention createTransaction2(Contract.TransferContract contract) {
+        return blockingStubFull.createTransaction2(contract);
+    }
+
+    public Transaction createTransaction(Contract.FreezeBalanceContract contract) {
+        return blockingStubFull.freezeBalance(contract);
+    }
+
+    public TransactionExtention createTransaction(Contract.BuyStorageContract contract) {
+        return blockingStubFull.buyStorage(contract);
+    }
+
+    public TransactionExtention createTransaction(Contract.BuyStorageBytesContract contract) {
+        return blockingStubFull.buyStorageBytes(contract);
+    }
+
+    public TransactionExtention createTransaction(Contract.SellStorageContract contract) {
+        return blockingStubFull.sellStorage(contract);
+    }
+
+    public TransactionExtention createTransaction2(Contract.FreezeBalanceContract contract) {
+        return blockingStubFull.freezeBalance2(contract);
+    }
+
+    public Transaction createTransaction(Contract.WithdrawBalanceContract contract) {
+        return blockingStubFull.withdrawBalance(contract);
+    }
+
+    public TransactionExtention createTransaction2(Contract.WithdrawBalanceContract contract) {
+        return blockingStubFull.withdrawBalance2(contract);
+    }
+
+    public Transaction createTransaction(Contract.UnfreezeBalanceContract contract) {
+        return blockingStubFull.unfreezeBalance(contract);
+    }
+
+    public TransactionExtention createTransaction2(Contract.UnfreezeBalanceContract contract) {
+        return blockingStubFull.unfreezeBalance2(contract);
+    }
+
+    public Transaction createTransaction(Contract.UnfreezeAssetContract contract) {
+        return blockingStubFull.unfreezeAsset(contract);
+    }
+
+    public TransactionExtention createTransaction2(Contract.UnfreezeAssetContract contract) {
+        return blockingStubFull.unfreezeAsset2(contract);
+    }
+
+    public Transaction createTransferAssetTransaction(Contract.TransferAssetContract contract) {
+        return blockingStubFull.transferAsset(contract);
+    }
+
+    public TransactionExtention createTransferAssetTransaction2(
+            Contract.TransferAssetContract contract) {
+        return blockingStubFull.transferAsset2(contract);
+    }
+
+    public Transaction createParticipateAssetIssueTransaction(
+            Contract.ParticipateAssetIssueContract contract) {
+        return blockingStubFull.participateAssetIssue(contract);
+    }
+
+    public TransactionExtention createParticipateAssetIssueTransaction2(
+            Contract.ParticipateAssetIssueContract contract) {
+        return blockingStubFull.participateAssetIssue2(contract);
+    }
+
+    public Transaction createAssetIssue(Contract.AssetIssueContract contract) {
+        return blockingStubFull.createAssetIssue(contract);
+    }
+
+    public TransactionExtention createAssetIssue2(Contract.AssetIssueContract contract) {
+        return blockingStubFull.createAssetIssue2(contract);
+    }
+
+    public Transaction voteWitnessAccount(Contract.VoteWitnessContract contract) {
+        return blockingStubFull.voteWitnessAccount(contract);
+    }
+
+    public TransactionExtention voteWitnessAccount2(Contract.VoteWitnessContract contract) {
+        return blockingStubFull.voteWitnessAccount2(contract);
+    }
+
+    public TransactionExtention proposalCreate(Contract.ProposalCreateContract contract) {
+        return blockingStubFull.proposalCreate(contract);
+    }
+
+    public Optional<ProposalList> listProposals() {
+        ProposalList proposalList = blockingStubFull.listProposals(EmptyMessage.newBuilder().build());
+        return Optional.ofNullable(proposalList);
+    }
+
+    public Optional<Proposal> getProposal(String id) {
+        BytesMessage request = BytesMessage.newBuilder().setValue(ByteString.copyFrom(
+                        ByteArray.fromLong(Long.parseLong(id))))
+                .build();
+        Proposal proposal = blockingStubFull.getProposalById(request);
+        return Optional.ofNullable(proposal);
+    }
+
+    public Optional<DelegatedResourceList> getDelegatedResource(String fromAddress,
+                                                                String toAddress) {
+
+        ByteString fromAddressBS = ByteString.copyFrom(
+                Objects.requireNonNull(decodeFromBase58Check(fromAddress)));
+        ByteString toAddressBS = ByteString.copyFrom(
+                Objects.requireNonNull(decodeFromBase58Check(toAddress)));
+
+        DelegatedResourceMessage request = DelegatedResourceMessage.newBuilder()
+                .setFromAddress(fromAddressBS)
+                .setToAddress(toAddressBS)
+                .build();
+        DelegatedResourceList delegatedResource = blockingStubFull
+                .getDelegatedResource(request);
+        return Optional.ofNullable(delegatedResource);
+    }
+
+    public Optional<DelegatedResourceAccountIndex> getDelegatedResourceAccountIndex(String address) {
+
+        ByteString addressBS = ByteString.copyFrom(
+                Objects.requireNonNull(decodeFromBase58Check(address)));
+
+        BytesMessage bytesMessage = BytesMessage.newBuilder().setValue(addressBS).build();
+
+        DelegatedResourceAccountIndex accountIndex = blockingStubFull
+                .getDelegatedResourceAccountIndex(bytesMessage);
+        return Optional.ofNullable(accountIndex);
+    }
+
+
+    public Optional<ExchangeList> listExchanges() {
+        ExchangeList exchangeList;
+        exchangeList = blockingStubFull.listExchanges(EmptyMessage.newBuilder().build());
+
+        return Optional.ofNullable(exchangeList);
+    }
+
+    public Optional<Exchange> getExchange(String id) {
+        BytesMessage request = BytesMessage.newBuilder().setValue(ByteString.copyFrom(
+                        ByteArray.fromLong(Long.parseLong(id))))
+                .build();
+
+        Exchange exchange;
+        exchange = blockingStubFull.getExchangeById(request);
+
+        return Optional.ofNullable(exchange);
+    }
+
+    public Optional<ChainParameters> getChainParameters() {
+        ChainParameters chainParameters = blockingStubFull
+                .getChainParameters(EmptyMessage.newBuilder().build());
+        return Optional.ofNullable(chainParameters);
+    }
+
+    public TransactionExtention proposalApprove(Contract.ProposalApproveContract contract) {
+        return blockingStubFull.proposalApprove(contract);
+    }
+
+    public TransactionExtention proposalDelete(Contract.ProposalDeleteContract contract) {
+        return blockingStubFull.proposalDelete(contract);
+    }
+
+    public TransactionExtention exchangeCreate(Contract.ExchangeCreateContract contract) {
+        return blockingStubFull.exchangeCreate(contract);
+    }
+
+    public TransactionExtention exchangeInject(Contract.ExchangeInjectContract contract) {
+        return blockingStubFull.exchangeInject(contract);
+    }
+
+    public TransactionExtention exchangeWithdraw(Contract.ExchangeWithdrawContract contract) {
+        return blockingStubFull.exchangeWithdraw(contract);
+    }
+
+    public TransactionExtention exchangeTransaction(Contract.ExchangeTransactionContract contract) {
+        return blockingStubFull.exchangeTransaction(contract);
+    }
+
+    public Transaction createAccount(Contract.AccountCreateContract contract) {
+        return blockingStubFull.createAccount(contract);
+    }
+
+    public TransactionExtention createAccount2(Contract.AccountCreateContract contract) {
+        return blockingStubFull.createAccount2(contract);
+    }
+
+    public AddressPrKeyPairMessage generateAddress(EmptyMessage emptyMessage) {
+        return blockingStubFull.generateAddress(emptyMessage);
+    }
+
+    public Transaction createWitness(Contract.WitnessCreateContract contract) {
+        return blockingStubFull.createWitness(contract);
+    }
+
+    public TransactionExtention createWitness2(Contract.WitnessCreateContract contract) {
+        return blockingStubFull.createWitness2(contract);
+    }
+
+    public Transaction updateWitness(Contract.WitnessUpdateContract contract) {
+        return blockingStubFull.updateWitness(contract);
+    }
+
+    public TransactionExtention updateWitness2(Contract.WitnessUpdateContract contract) {
+        return blockingStubFull.updateWitness2(contract);
+    }
+
+    public Transaction broadcastTransaction(Transaction transactionSigned) {
+        GrpcAPI.TransactionSignWeight weight = getTransactionSignWeight(transactionSigned);
+
+        if (weight.getResult().getCode() == GrpcAPI.TransactionSignWeight.Result.response_code.NOT_ENOUGH_PERMISSION) {
+            throw new TransactionException(String.format("Current signWeight is: %s. Get error with response code: %s",
+                    Utils.printTransactionSignWeight(weight), GrpcAPI.TransactionSignWeight.Result.response_code.NOT_ENOUGH_PERMISSION.name()),
+                    weight.getResult().getCode().name(), weight.getResult().getCode().getNumber()
+            );
+        }
+
+        int i = 10;
+        Return response = blockingStubFull.broadcastTransaction(transactionSigned);
+        while (!response.getResult() && response.getCode() == response_code.SERVER_BUSY
+                && i > 0) {
+            i--;
+            response = blockingStubFull.broadcastTransaction(transactionSigned);
+            System.out.println("repeat times = " + (11 - i));
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+        if (!response.getResult()) {
+            throw new TransactionException(
+                    "Code = " + response.getCode().name() + " " + response.getCode().getNumber() + "; Message = " + response.getMessage().toStringUtf8(),
+                    response.getCode().name(),
+                    response.getCode().getNumber()
+            );
+        }
+        return transactionSigned;
+    }
+
+    public Block getBlock(long blockNum) {
+        if (blockNum < 0) {
+            return blockingStubFull.getNowBlock(EmptyMessage.newBuilder().build());
+        }
+        NumberMessage.Builder builder = NumberMessage.newBuilder();
+        builder.setNum(blockNum);
+        return blockingStubFull.getBlockByNum(builder.build());
+    }
+
+    public long getTransactionCountByBlockNum(long blockNum) {
+        NumberMessage.Builder builder = NumberMessage.newBuilder();
+        builder.setNum(blockNum);
+        return blockingStubFull.getTransactionCountByBlockNum(builder.build()).getNum();
+    }
+
+    public BlockExtention getBlock2(long blockNum) {
+        if (blockNum < 0) {
+            return blockingStubFull.getNowBlock2(EmptyMessage.newBuilder().build());
+        }
+        NumberMessage.Builder builder = NumberMessage.newBuilder();
+        builder.setNum(blockNum);
+        return blockingStubFull.getBlockByNum2(builder.build());
+    }
 
 //  public Optional<AccountList> listAccounts() {
 //    AccountList accountList = blockingStubSolidity
@@ -576,127 +433,96 @@ public class GrpcClient {
 //
 //  }
 
-  public Optional<WitnessList> listWitnesses() {
-    if (blockingStubSolidity != null) {
-      WitnessList witnessList = blockingStubSolidity
-          .listWitnesses(EmptyMessage.newBuilder().build());
-      return Optional.ofNullable(witnessList);
-    } else {
-      WitnessList witnessList = blockingStubFull.listWitnesses(EmptyMessage.newBuilder().build());
-      return Optional.ofNullable(witnessList);
+    public Optional<WitnessList> listWitnesses() {
+        WitnessList witnessList = blockingStubFull.listWitnesses(EmptyMessage.newBuilder().build());
+        return Optional.ofNullable(witnessList);
     }
-  }
 
-  public Optional<AssetIssueList> getAssetIssueList() {
-    if (blockingStubSolidity != null) {
-      AssetIssueList assetIssueList = blockingStubSolidity
-          .getAssetIssueList(EmptyMessage.newBuilder().build());
-      return Optional.ofNullable(assetIssueList);
-    } else {
-      AssetIssueList assetIssueList = blockingStubFull
-          .getAssetIssueList(EmptyMessage.newBuilder().build());
-      return Optional.ofNullable(assetIssueList);
+    public Optional<AssetIssueList> getAssetIssueList() {
+        AssetIssueList assetIssueList = blockingStubFull
+                .getAssetIssueList(EmptyMessage.newBuilder().build());
+        return Optional.ofNullable(assetIssueList);
     }
-  }
 
-  public Optional<AssetIssueList> getAssetIssueList(long offset, long limit) {
-    PaginatedMessage.Builder pageMessageBuilder = PaginatedMessage.newBuilder();
-    pageMessageBuilder.setOffset(offset);
-    pageMessageBuilder.setLimit(limit);
-    if (blockingStubSolidity != null) {
-      AssetIssueList assetIssueList = blockingStubSolidity.
-          getPaginatedAssetIssueList(pageMessageBuilder.build());
-      return Optional.ofNullable(assetIssueList);
-    } else {
-      AssetIssueList assetIssueList = blockingStubFull
-          .getPaginatedAssetIssueList(pageMessageBuilder.build());
-      return Optional.ofNullable(assetIssueList);
+    public Optional<AssetIssueList> getAssetIssueList(long offset, long limit) {
+        PaginatedMessage.Builder pageMessageBuilder = PaginatedMessage.newBuilder();
+        pageMessageBuilder.setOffset(offset);
+        pageMessageBuilder.setLimit(limit);
+        AssetIssueList assetIssueList = blockingStubFull
+                .getPaginatedAssetIssueList(pageMessageBuilder.build());
+        return Optional.ofNullable(assetIssueList);
     }
-  }
 
-  public Optional<ProposalList> getProposalListPaginated(long offset, long limit) {
-    PaginatedMessage.Builder pageMessageBuilder = PaginatedMessage.newBuilder();
-    pageMessageBuilder.setOffset(offset);
-    pageMessageBuilder.setLimit(limit);
-    ProposalList proposalList = blockingStubFull
-        .getPaginatedProposalList(pageMessageBuilder.build());
-    return Optional.ofNullable(proposalList);
+    public Optional<ProposalList> getProposalListPaginated(long offset, long limit) {
+        PaginatedMessage.Builder pageMessageBuilder = PaginatedMessage.newBuilder();
+        pageMessageBuilder.setOffset(offset);
+        pageMessageBuilder.setLimit(limit);
+        ProposalList proposalList = blockingStubFull
+                .getPaginatedProposalList(pageMessageBuilder.build());
+        return Optional.ofNullable(proposalList);
 
-  }
-
-  public Optional<ExchangeList> getExchangeListPaginated(long offset, long limit) {
-    PaginatedMessage.Builder pageMessageBuilder = PaginatedMessage.newBuilder();
-    pageMessageBuilder.setOffset(offset);
-    pageMessageBuilder.setLimit(limit);
-    ExchangeList exchangeList = blockingStubFull
-        .getPaginatedExchangeList(pageMessageBuilder.build());
-    return Optional.ofNullable(exchangeList);
-
-  }
-
-  public Optional<NodeList> listNodes() {
-    NodeList nodeList = blockingStubFull.listNodes(EmptyMessage.newBuilder().build());
-    return Optional.ofNullable(nodeList);
-  }
-
-  public Optional<AssetIssueList> getAssetIssueByAccount(byte[] address) {
-    ByteString addressBS = ByteString.copyFrom(address);
-    Account request = Account.newBuilder().setAddress(addressBS).build();
-    AssetIssueList assetIssueList = blockingStubFull.getAssetIssueByAccount(request);
-    return Optional.ofNullable(assetIssueList);
-  }
-
-  public AccountNetMessage getAccountNet(byte[] address) {
-    ByteString addressBS = ByteString.copyFrom(address);
-    Account request = Account.newBuilder().setAddress(addressBS).build();
-    return blockingStubFull.getAccountNet(request);
-  }
-
-  public AccountResourceMessage getAccountResource(byte[] address) {
-    ByteString addressBS = ByteString.copyFrom(address);
-    Account request = Account.newBuilder().setAddress(addressBS).build();
-    return blockingStubFull.getAccountResource(request);
-  }
-
-  public Contract.AssetIssueContract getAssetIssueByName(String assetName) {
-    ByteString assetNameBs = ByteString.copyFrom(assetName.getBytes());
-    BytesMessage request = BytesMessage.newBuilder().setValue(assetNameBs).build();
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.getAssetIssueByName(request);
-    } else {
-      return blockingStubFull.getAssetIssueByName(request);
     }
-  }
 
-  public Optional<AssetIssueList> getAssetIssueListByName(String assetName) {
-    ByteString assetNameBs = ByteString.copyFrom(assetName.getBytes());
-    BytesMessage request = BytesMessage.newBuilder().setValue(assetNameBs).build();
-    if (blockingStubSolidity != null) {
-      AssetIssueList assetIssueList = blockingStubSolidity.getAssetIssueListByName(request);
-      return Optional.ofNullable(assetIssueList);
-    } else {
-      AssetIssueList assetIssueList = blockingStubFull.getAssetIssueListByName(request);
-      return Optional.ofNullable(assetIssueList);
+    public Optional<ExchangeList> getExchangeListPaginated(long offset, long limit) {
+        PaginatedMessage.Builder pageMessageBuilder = PaginatedMessage.newBuilder();
+        pageMessageBuilder.setOffset(offset);
+        pageMessageBuilder.setLimit(limit);
+        ExchangeList exchangeList = blockingStubFull
+                .getPaginatedExchangeList(pageMessageBuilder.build());
+        return Optional.ofNullable(exchangeList);
+
     }
-  }
 
-  public Contract.AssetIssueContract getAssetIssueById(String assetId) {
-    ByteString assetIdBs = ByteString.copyFrom(assetId.getBytes());
-    BytesMessage request = BytesMessage.newBuilder().setValue(assetIdBs).build();
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.getAssetIssueById(request);
-    } else {
-      return blockingStubFull.getAssetIssueById(request);
+    public Optional<NodeList> listNodes() {
+        NodeList nodeList = blockingStubFull.listNodes(EmptyMessage.newBuilder().build());
+        return Optional.ofNullable(nodeList);
     }
-  }
 
-  public NumberMessage getTotalTransaction() {
-    return blockingStubFull.totalTransaction(EmptyMessage.newBuilder().build());
-  }
+    public Optional<AssetIssueList> getAssetIssueByAccount(byte[] address) {
+        ByteString addressBS = ByteString.copyFrom(address);
+        Account request = Account.newBuilder().setAddress(addressBS).build();
+        AssetIssueList assetIssueList = blockingStubFull.getAssetIssueByAccount(request);
+        return Optional.ofNullable(assetIssueList);
+    }
 
-  public NumberMessage getNextMaintenanceTime() {
-    return blockingStubFull.getNextMaintenanceTime(EmptyMessage.newBuilder().build());
-  }
+    public AccountNetMessage getAccountNet(byte[] address) {
+        ByteString addressBS = ByteString.copyFrom(address);
+        Account request = Account.newBuilder().setAddress(addressBS).build();
+        return blockingStubFull.getAccountNet(request);
+    }
+
+    public AccountResourceMessage getAccountResource(byte[] address) {
+        ByteString addressBS = ByteString.copyFrom(address);
+        Account request = Account.newBuilder().setAddress(addressBS).build();
+        return blockingStubFull.getAccountResource(request);
+    }
+
+    public Contract.AssetIssueContract getAssetIssueByName(String assetName) {
+        ByteString assetNameBs = ByteString.copyFrom(assetName.getBytes());
+        BytesMessage request = BytesMessage.newBuilder().setValue(assetNameBs).build();
+        return blockingStubFull.getAssetIssueByName(request);
+    }
+
+    public Optional<AssetIssueList> getAssetIssueListByName(String assetName) {
+        ByteString assetNameBs = ByteString.copyFrom(assetName.getBytes());
+        BytesMessage request = BytesMessage.newBuilder().setValue(assetNameBs).build();
+        AssetIssueList assetIssueList = blockingStubFull.getAssetIssueListByName(request);
+        return Optional.ofNullable(assetIssueList);
+    }
+
+    public Contract.AssetIssueContract getAssetIssueById(String assetId) {
+        ByteString assetIdBs = ByteString.copyFrom(assetId.getBytes());
+        BytesMessage request = BytesMessage.newBuilder().setValue(assetIdBs).build();
+        return blockingStubFull.getAssetIssueById(request);
+    }
+
+    public NumberMessage getTotalTransaction() {
+        return blockingStubFull.totalTransaction(EmptyMessage.newBuilder().build());
+    }
+
+    public NumberMessage getNextMaintenanceTime() {
+        return blockingStubFull.getNextMaintenanceTime(EmptyMessage.newBuilder().build());
+    }
 
 //  public Optional<AssetIssueList> getAssetIssueListByTimestamp(long time) {
 //    NumberMessage.Builder timeStamp = NumberMessage.newBuilder();
@@ -727,396 +553,360 @@ public class GrpcClient {
 //    return blockingStubExtension.getTransactionsByTimestampCount(timeMessage.build());
 //  }
 
-  public Optional<TransactionList> getTransactionsFromThis(byte[] address, int offset, int limit) {
-    ByteString addressBS = ByteString.copyFrom(address);
-    Account account = Account.newBuilder().setAddress(addressBS).build();
-    AccountPaginated.Builder accountPaginated = AccountPaginated.newBuilder();
-    accountPaginated.setAccount(account);
-    accountPaginated.setOffset(offset);
-    accountPaginated.setLimit(limit);
-    TransactionList transactionList = blockingStubExtension
-        .getTransactionsFromThis(accountPaginated.build());
-    return Optional.ofNullable(transactionList);
-  }
-
-  public Optional<TransactionListExtention> getTransactionsFromThis2(byte[] address, int offset,
-      int limit) {
-    ByteString addressBS = ByteString.copyFrom(address);
-    Account account = Account.newBuilder().setAddress(addressBS).build();
-    AccountPaginated.Builder accountPaginated = AccountPaginated.newBuilder();
-    accountPaginated.setAccount(account);
-    accountPaginated.setOffset(offset);
-    accountPaginated.setLimit(limit);
-    TransactionListExtention transactionList = blockingStubExtension
-        .getTransactionsFromThis2(accountPaginated.build());
-    return Optional.ofNullable(transactionList);
-  }
-
 //  public NumberMessage getTransactionsFromThisCount(byte[] address) {
 //    ByteString addressBS = ByteString.copyFrom(address);
 //    Account account = Account.newBuilder().setAddress(addressBS).build();
 //    return blockingStubExtension.getTransactionsFromThisCount(account);
 //  }
 
-  public Optional<TransactionList> getTransactionsToThis(byte[] address, int offset, int limit) {
-    ByteString addressBS = ByteString.copyFrom(address);
-    Account account = Account.newBuilder().setAddress(addressBS).build();
-    AccountPaginated.Builder accountPaginated = AccountPaginated.newBuilder();
-    accountPaginated.setAccount(account);
-    accountPaginated.setOffset(offset);
-    accountPaginated.setLimit(limit);
-    TransactionList transactionList = blockingStubExtension
-        .getTransactionsToThis(accountPaginated.build());
-    return Optional.ofNullable(transactionList);
-  }
-
-  public Optional<TransactionListExtention> getTransactionsToThis2(byte[] address, int offset,
-      int limit) {
-    ByteString addressBS = ByteString.copyFrom(address);
-    Account account = Account.newBuilder().setAddress(addressBS).build();
-    AccountPaginated.Builder accountPaginated = AccountPaginated.newBuilder();
-    accountPaginated.setAccount(account);
-    accountPaginated.setOffset(offset);
-    accountPaginated.setLimit(limit);
-    TransactionListExtention transactionList = blockingStubExtension
-        .getTransactionsToThis2(accountPaginated.build());
-    return Optional.ofNullable(transactionList);
-  }
 //  public NumberMessage getTransactionsToThisCount(byte[] address) {
 //    ByteString addressBS = ByteString.copyFrom(address);
 //    Account account = Account.newBuilder().setAddress(addressBS).build();
 //    return blockingStubExtension.getTransactionsToThisCount(account);
 //  }
 
-  public Optional<Transaction> getTransactionById(String txID) {
-    ByteString bsTxid = ByteString.copyFrom(ByteArray.fromHexString(txID));
-    BytesMessage request = BytesMessage.newBuilder().setValue(bsTxid).build();
-    Transaction transaction = blockingStubFull.getTransactionById(request);
-    return Optional.ofNullable(transaction);
-  }
-
-  public Optional<TransactionInfo> getTransactionInfoById(String txID) {
-    ByteString bsTxid = ByteString.copyFrom(ByteArray.fromHexString(txID));
-    BytesMessage request = BytesMessage.newBuilder().setValue(bsTxid).build();
-    TransactionInfo transactionInfo;
-    if (blockingStubSolidity != null) {
-      transactionInfo = blockingStubSolidity.getTransactionInfoById(request);
-    } else {
-      transactionInfo = blockingStubFull.getTransactionInfoById(request);
+    public Optional<Transaction> getTransactionById(String txID) {
+        ByteString bsTxid = ByteString.copyFrom(ByteArray.fromHexString(txID));
+        BytesMessage request = BytesMessage.newBuilder().setValue(bsTxid).build();
+        Transaction transaction = blockingStubFull.getTransactionById(request);
+        return Optional.ofNullable(transaction);
     }
-    return Optional.ofNullable(transactionInfo);
-  }
 
-  public Optional<Block> getBlockById(String blockID) {
-    ByteString bsTxid = ByteString.copyFrom(ByteArray.fromHexString(blockID));
-    BytesMessage request = BytesMessage.newBuilder().setValue(bsTxid).build();
-    Block block = blockingStubFull.getBlockById(request);
-    return Optional.ofNullable(block);
-  }
-
-  public Optional<BlockList> getBlockByLimitNext(long start, long end) {
-    BlockLimit.Builder builder = BlockLimit.newBuilder();
-    builder.setStartNum(start);
-    builder.setEndNum(end);
-    BlockList blockList = blockingStubFull.getBlockByLimitNext(builder.build());
-    return Optional.ofNullable(blockList);
-  }
-
-  public Optional<BlockListExtention> getBlockByLimitNext2(long start, long end) {
-    BlockLimit.Builder builder = BlockLimit.newBuilder();
-    builder.setStartNum(start);
-    builder.setEndNum(end);
-    BlockListExtention blockList = blockingStubFull.getBlockByLimitNext2(builder.build());
-    return Optional.ofNullable(blockList);
-  }
-
-  public Optional<BlockList> getBlockByLatestNum(long num) {
-    NumberMessage numberMessage = NumberMessage.newBuilder().setNum(num).build();
-    BlockList blockList = blockingStubFull.getBlockByLatestNum(numberMessage);
-    return Optional.ofNullable(blockList);
-  }
-
-  public Optional<BlockListExtention> getBlockByLatestNum2(long num) {
-    NumberMessage numberMessage = NumberMessage.newBuilder().setNum(num).build();
-    BlockListExtention blockList = blockingStubFull.getBlockByLatestNum2(numberMessage);
-    return Optional.ofNullable(blockList);
-  }
-
-  public TransactionExtention updateSetting(Contract.UpdateSettingContract request) {
-    return blockingStubFull.updateSetting(request);
-  }
-
-  public TransactionExtention updateEnergyLimit(
-      Contract.UpdateEnergyLimitContract request) {
-    return blockingStubFull.updateEnergyLimit(request);
-  }
-
-  public TransactionExtention clearContractABI(
-      Contract.ClearABIContract request) {
-    return blockingStubFull.clearContractABI(request);
-  }
-
-  public TransactionExtention deployContract(Contract.CreateSmartContract request) {
-    return blockingStubFull.deployContract(request);
-  }
-
-  public TransactionExtention triggerContract(Contract.TriggerSmartContract request) {
-    return blockingStubFull.triggerContract(request);
-  }
-
-  public TransactionExtention triggerConstantContract(Contract.TriggerSmartContract request) {
-    return blockingStubFull.triggerConstantContract(request);
-  }
-
-  public SmartContract getContract(byte[] address) {
-    ByteString byteString = ByteString.copyFrom(address);
-    BytesMessage bytesMessage = BytesMessage.newBuilder().setValue(byteString).build();
-    return blockingStubFull.getContract(bytesMessage);
-  }
-
-  public TransactionExtention accountPermissionUpdate(
-      Contract.AccountPermissionUpdateContract request) {
-    return blockingStubFull.accountPermissionUpdate(request);
-  }
-
-
-  public TransactionExtention createShieldedTransaction(PrivateParameters privateParameters) {
-    return blockingStubFull.createShieldedTransaction(privateParameters);
-  }
-
-  public IncrementalMerkleVoucherInfo GetMerkleTreeVoucherInfo(OutputPointInfo info) {
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.getMerkleTreeVoucherInfo(info);
-    } else {
-      return blockingStubFull.getMerkleTreeVoucherInfo(info);
+    public Optional<TransactionInfo> getTransactionInfoById(String txID) {
+        ByteString bsTxid = ByteString.copyFrom(ByteArray.fromHexString(txID));
+        BytesMessage request = BytesMessage.newBuilder().setValue(bsTxid).build();
+        TransactionInfo transactionInfo;
+        transactionInfo = blockingStubFull.getTransactionInfoById(request);
+        return Optional.ofNullable(transactionInfo);
     }
-  }
 
-  public DecryptNotes scanNoteByIvk(IvkDecryptParameters ivkDecryptParameters) {
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.scanNoteByIvk(ivkDecryptParameters);
-    } else {
-      return blockingStubFull.scanNoteByIvk(ivkDecryptParameters);
+    public Optional<Block> getBlockById(String blockID) {
+        ByteString bsTxid = ByteString.copyFrom(ByteArray.fromHexString(blockID));
+        BytesMessage request = BytesMessage.newBuilder().setValue(bsTxid).build();
+        Block block = blockingStubFull.getBlockById(request);
+        return Optional.ofNullable(block);
     }
-  }
 
-  public DecryptNotes scanNoteByOvk(OvkDecryptParameters ovkDecryptParameters) {
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.scanNoteByOvk(ovkDecryptParameters);
-    } else {
-      return blockingStubFull.scanNoteByOvk(ovkDecryptParameters);
+    public Optional<BlockList> getBlockByLimitNext(long start, long end) {
+        BlockLimit.Builder builder = BlockLimit.newBuilder();
+        builder.setStartNum(start);
+        builder.setEndNum(end);
+        BlockList blockList = blockingStubFull.getBlockByLimitNext(builder.build());
+        return Optional.ofNullable(blockList);
     }
-  }
 
-  public BytesMessage getSpendingKey() {
-    return blockingStubFull.getSpendingKey(EmptyMessage.newBuilder().build());
-  }
-
-  public ExpandedSpendingKeyMessage getExpandedSpendingKey(BytesMessage spendingKey) {
-    return blockingStubFull.getExpandedSpendingKey(spendingKey);
-  }
-
-  public BytesMessage getAkFromAsk(BytesMessage ask) {
-    return blockingStubFull.getAkFromAsk(ask);
-  }
-
-  public BytesMessage getNkFromNsk(BytesMessage nsk) {
-    return blockingStubFull.getNkFromNsk(nsk);
-  }
-
-  public IncomingViewingKeyMessage getIncomingViewingKey(ViewingKeyMessage viewingKeyMessage) {
-    return blockingStubFull.getIncomingViewingKey(viewingKeyMessage);
-  }
-
-  public DiversifierMessage getDiversifier() {
-    return blockingStubFull.getDiversifier(EmptyMessage.newBuilder().build());
-  }
-
-  public BytesMessage getRcm() {
-    return blockingStubFull.getRcm(EmptyMessage.newBuilder().build());
-  }
-
-  public SpendResult isNoteSpend(NoteParameters noteParameters) {
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.isSpend(noteParameters);
-    } else {
-      return blockingStubFull.isSpend(noteParameters);
+    public Optional<BlockListExtention> getBlockByLimitNext2(long start, long end) {
+        BlockLimit.Builder builder = BlockLimit.newBuilder();
+        builder.setStartNum(start);
+        builder.setEndNum(end);
+        BlockListExtention blockList = blockingStubFull.getBlockByLimitNext2(builder.build());
+        return Optional.ofNullable(blockList);
     }
-  }
 
-  public TransactionExtention createShieldedTransactionWithoutSpendAuthSig(
-      PrivateParametersWithoutAsk privateParameters) {
-    return blockingStubFull.createShieldedTransactionWithoutSpendAuthSig(privateParameters);
-  }
-
-  public BytesMessage getShieldedTransactionHash(Transaction transaction) {
-    return blockingStubFull.getShieldTransactionHash(transaction);
-  }
-
-  public BytesMessage createSpendAuthSig(SpendAuthSigParameters parameters) {
-    return blockingStubFull.createSpendAuthSig(parameters);
-  }
-
-  public BytesMessage createShieldedNullifier(NfParameters parameters) {
-    return blockingStubFull.createShieldNullifier(parameters);
-  }
-
-  public PaymentAddressMessage getZenPaymentAddress(IncomingViewingKeyDiversifierMessage msg) {
-    return blockingStubFull.getZenPaymentAddress(msg);
-  }
-
-  public DecryptNotesMarked scanAndMarkNoteByIvk(IvkDecryptAndMarkParameters parameters) {
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.scanAndMarkNoteByIvk(parameters);
-    } else {
-      return blockingStubFull.scanAndMarkNoteByIvk(parameters);
+    public Optional<BlockList> getBlockByLatestNum(long num) {
+        NumberMessage numberMessage = NumberMessage.newBuilder().setNum(num).build();
+        BlockList blockList = blockingStubFull.getBlockByLatestNum(numberMessage);
+        return Optional.ofNullable(blockList);
     }
-  }
 
-  public TransactionExtention updateBrokerage(Contract.UpdateBrokerageContract request) {
-    return blockingStubFull.updateBrokerage(request);
-  }
-
-  public NumberMessage getReward(byte[] address) {
-    BytesMessage bytesMessage = BytesMessage.newBuilder().setValue(ByteString.copyFrom(address))
-        .build();
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.getRewardInfo(bytesMessage);
-    } else {
-      return blockingStubFull.getRewardInfo(bytesMessage);
+    public Optional<BlockListExtention> getBlockByLatestNum2(long num) {
+        NumberMessage numberMessage = NumberMessage.newBuilder().setNum(num).build();
+        BlockListExtention blockList = blockingStubFull.getBlockByLatestNum2(numberMessage);
+        return Optional.ofNullable(blockList);
     }
-  }
 
-  public NumberMessage getBrokerage(byte[] address) {
-    BytesMessage bytesMessage = BytesMessage.newBuilder().setValue(ByteString.copyFrom(address))
-        .build();
-    if (blockingStubSolidity != null) {
-      return blockingStubSolidity.getBrokerageInfo(bytesMessage);
-    } else {
-      return blockingStubFull.getBrokerageInfo(bytesMessage);
+    public TransactionExtention updateSetting(Contract.UpdateSettingContract request) {
+        return blockingStubFull.updateSetting(request);
     }
-  }
 
-  public String send(String from, String to, long amount, String privateKey) throws TransactionException {
-    Transaction transaction = TransactionUtils.send(from, to, amount, ECKey.fromPrivate(ByteArray.fromHexString(privateKey)));
-    return getTxId(transaction);
-  }
-
-  public String sendTokens(String from, String to, String contract, long rawAmount, String privateKey, Double feeLimitInTrx) throws TransactionException {
-    Transaction transaction = createRawTrc20Transaction(from, to, contract, rawAmount, feeLimitInTrx);
-    Transaction signedTransaction = TransactionUtils.signTransactionOffline(transaction, privateKey);
-    Transaction broadcastTransaction = TransactionUtils.broadcastTransaction(signedTransaction);
-    return getTxId(broadcastTransaction);
-  }
-
-   public Transaction createRawTransaction(String from, String to, long amount) throws TransactionException {
-      return TransactionUtils.createRawTransaction(from, to, amount);
-   }
-
-   // if feeLimit is null, will use default = 10 TRX * TRX precision
-  public Transaction createRawTrc20Transaction(String from, String to, String contractAddress, long rawAmount, Double trxFeeLimit) throws TransactionException {
-    byte[] data = Hex.decode(AbiUtil.parseMethod("transfer(address,uint256)", String.format("\"%s\",%s", to, rawAmount), false));
-    Contract.TriggerSmartContract triggerSmartContractRequest = Contract.TriggerSmartContract.newBuilder()
-            .setContractAddress(ByteString.copyFrom(WalletApi.decodeFromBase58Check(contractAddress)))
-            .setOwnerAddress(ByteString.copyFrom(WalletApi.decodeFromBase58Check(from)))
-            .setData(ByteString.copyFrom(data))
-            .setCallValue(0)
-            .build();
-    TransactionExtention transactionExtention = triggerContract(triggerSmartContractRequest);
-    if (!(transactionExtention.hasResult() && transactionExtention.getResult().getCode() == response_code.SUCCESS)) {
-      throw new RuntimeException("Something went wrong. Response: " + transactionExtention);
+    public TransactionExtention updateEnergyLimit(
+            Contract.UpdateEnergyLimitContract request) {
+        return blockingStubFull.updateEnergyLimit(request);
     }
-    Protocol.Block newestBlock = WalletApi.getBlock(-1);
-    Transaction originalTransaction = transactionExtention.getTransaction();
 
-    Transaction.Builder transactionBuilder = Transaction.newBuilder(originalTransaction);
-    transactionBuilder.getRawDataBuilder()
-            .setFeeLimit(trxFeeLimit == null ? 10_000_000 : ((long) (trxFeeLimit * 1000_000)))
-            .setTimestamp(System.currentTimeMillis())
-            .setExpiration(newestBlock.getBlockHeader().getRawData().getTimestamp() + 10 * 60 * 60 * 1000);
-    return TransactionUtils.setReference(transactionBuilder.build(), newestBlock);
-  }
-
-  // amount is in RAW format (you can convert it to double/bigdecimal using getPrecision method)
-  public long getTrc20TokenBalance(String from, String contractAddress) {
-    byte[] data = Hex.decode(AbiUtil.parseMethod("balanceOf(address)", "\"" + from + "\"", false));
-    Contract.TriggerSmartContract triggerSmartContractRequest = Contract.TriggerSmartContract.newBuilder()
-            .setContractAddress(ByteString.copyFrom(WalletApi.decodeFromBase58Check(contractAddress)))
-            .setOwnerAddress(ByteString.copyFrom(WalletApi.decodeFromBase58Check(from)))
-            .setData(ByteString.copyFrom(data))
-            .setCallValue(0)
-            .build();
-    TransactionExtention transactionExtention = GrpcClientHolder.getGrpcClient().triggerConstantContract(triggerSmartContractRequest);
-    if (!(transactionExtention.hasResult() && transactionExtention.getResult().getCode() == response_code.SUCCESS) || !(
-            transactionExtention.getTransaction().getRetCount() != 0
-                    && transactionExtention.getConstantResult(0) != null
-                    && transactionExtention.getResult() != null
-            )) {
-      throw new RuntimeException("Something went wrong. Response: " + transactionExtention);
+    public TransactionExtention clearContractABI(
+            Contract.ClearABIContract request) {
+        return blockingStubFull.clearContractABI(request);
     }
-    return new BigInteger(1, transactionExtention.getConstantResult(0).toByteArray()).longValueExact();
-  }
 
-   public int getPrecision(String from, String contractAddress) {
-     byte[] data = Hex.decode(AbiUtil.parseMethod("decimals()", "", false));
-     Contract.TriggerSmartContract triggerSmartContractRequest = Contract.TriggerSmartContract.newBuilder()
-             .setContractAddress(ByteString.copyFrom(WalletApi.decodeFromBase58Check(contractAddress)))
-             .setOwnerAddress(ByteString.copyFrom(WalletApi.decodeFromBase58Check(from)))
-             .setData(ByteString.copyFrom(data))
-             .setCallValue(0)
-             .build();
-     TransactionExtention transactionExtention = GrpcClientHolder.getGrpcClient().triggerConstantContract(triggerSmartContractRequest);
-     Transaction transaction = transactionExtention.getTransaction();
-     // for constant
-     if (transaction.getRetCount() != 0
-             && transactionExtention.getConstantResult(0) != null
-             && transactionExtention.getResult() != null) {
-       byte[] result = transactionExtention.getConstantResult(0).toByteArray();
-       return Integer.valueOf(result[result.length-1]);
-     } else {
-       throw new RuntimeException("Something went wrong!");
-     }
-   }
+    public TransactionExtention deployContract(Contract.CreateSmartContract request) {
+        return blockingStubFull.deployContract(request);
+    }
 
-  public String getSymbol(String from, String contractAddress) {
-    byte[] data = Hex.decode(AbiUtil.parseMethod("symbol()", "", false));
-    Contract.TriggerSmartContract triggerSmartContractRequest = Contract.TriggerSmartContract.newBuilder()
-            .setContractAddress(ByteString.copyFrom(WalletApi.decodeFromBase58Check(contractAddress)))
-            .setOwnerAddress(ByteString.copyFrom(WalletApi.decodeFromBase58Check(from)))
-            .setData(ByteString.copyFrom(data))
-            .setCallValue(0)
-            .build();
-    TransactionExtention transactionExtention = GrpcClientHolder.getGrpcClient().triggerConstantContract(triggerSmartContractRequest);
-    Transaction transaction = transactionExtention.getTransaction();
-    // for constant
-    if (transaction.getRetCount() != 0
-            && transactionExtention.getConstantResult(0) != null
-            && transactionExtention.getResult() != null) {
-      byte[] result = transactionExtention.getConstantResult(0).toByteArray();
-      List<Byte> resultList = new ArrayList<>(result.length - 64);
-      for (byte b : Arrays.copyOfRange(result, 64, result.length)) {
-        if (b != 0) {
-          resultList.add(b);
+    public TransactionExtention triggerContract(Contract.TriggerSmartContract request) {
+        return blockingStubFull.triggerContract(request);
+    }
+
+    public TransactionExtention triggerConstantContract(Contract.TriggerSmartContract request) {
+        return blockingStubFull.triggerConstantContract(request);
+    }
+
+    public SmartContract getContract(byte[] address) {
+        ByteString byteString = ByteString.copyFrom(address);
+        BytesMessage bytesMessage = BytesMessage.newBuilder().setValue(byteString).build();
+        return blockingStubFull.getContract(bytesMessage);
+    }
+
+    public TransactionExtention accountPermissionUpdate(
+            Contract.AccountPermissionUpdateContract request) {
+        return blockingStubFull.accountPermissionUpdate(request);
+    }
+
+
+    public TransactionExtention createShieldedTransaction(PrivateParameters privateParameters) {
+        return blockingStubFull.createShieldedTransaction(privateParameters);
+    }
+
+    public IncrementalMerkleVoucherInfo GetMerkleTreeVoucherInfo(OutputPointInfo info) {
+        return blockingStubFull.getMerkleTreeVoucherInfo(info);
+    }
+
+    public DecryptNotes scanNoteByIvk(IvkDecryptParameters ivkDecryptParameters) {
+        return blockingStubFull.scanNoteByIvk(ivkDecryptParameters);
+    }
+
+    public DecryptNotes scanNoteByOvk(OvkDecryptParameters ovkDecryptParameters) {
+        return blockingStubFull.scanNoteByOvk(ovkDecryptParameters);
+    }
+
+    public BytesMessage getSpendingKey() {
+        return blockingStubFull.getSpendingKey(EmptyMessage.newBuilder().build());
+    }
+
+    public ExpandedSpendingKeyMessage getExpandedSpendingKey(BytesMessage spendingKey) {
+        return blockingStubFull.getExpandedSpendingKey(spendingKey);
+    }
+
+    public BytesMessage getAkFromAsk(BytesMessage ask) {
+        return blockingStubFull.getAkFromAsk(ask);
+    }
+
+    public BytesMessage getNkFromNsk(BytesMessage nsk) {
+        return blockingStubFull.getNkFromNsk(nsk);
+    }
+
+    public IncomingViewingKeyMessage getIncomingViewingKey(ViewingKeyMessage viewingKeyMessage) {
+        return blockingStubFull.getIncomingViewingKey(viewingKeyMessage);
+    }
+
+    public DiversifierMessage getDiversifier() {
+        return blockingStubFull.getDiversifier(EmptyMessage.newBuilder().build());
+    }
+
+    public BytesMessage getRcm() {
+        return blockingStubFull.getRcm(EmptyMessage.newBuilder().build());
+    }
+
+    public SpendResult isNoteSpend(NoteParameters noteParameters) {
+        return blockingStubFull.isSpend(noteParameters);
+    }
+
+    public TransactionExtention createShieldedTransactionWithoutSpendAuthSig(
+            PrivateParametersWithoutAsk privateParameters) {
+        return blockingStubFull.createShieldedTransactionWithoutSpendAuthSig(privateParameters);
+    }
+
+    public BytesMessage getShieldedTransactionHash(Transaction transaction) {
+        return blockingStubFull.getShieldTransactionHash(transaction);
+    }
+
+    public BytesMessage createSpendAuthSig(SpendAuthSigParameters parameters) {
+        return blockingStubFull.createSpendAuthSig(parameters);
+    }
+
+    public BytesMessage createShieldedNullifier(NfParameters parameters) {
+        return blockingStubFull.createShieldNullifier(parameters);
+    }
+
+    public PaymentAddressMessage getZenPaymentAddress(IncomingViewingKeyDiversifierMessage msg) {
+        return blockingStubFull.getZenPaymentAddress(msg);
+    }
+
+    public DecryptNotesMarked scanAndMarkNoteByIvk(IvkDecryptAndMarkParameters parameters) {
+        return blockingStubFull.scanAndMarkNoteByIvk(parameters);
+    }
+
+    public TransactionExtention updateBrokerage(Contract.UpdateBrokerageContract request) {
+        return blockingStubFull.updateBrokerage(request);
+    }
+
+    public NumberMessage getReward(byte[] address) {
+        BytesMessage bytesMessage = BytesMessage.newBuilder().setValue(ByteString.copyFrom(address))
+                .build();
+        return blockingStubFull.getRewardInfo(bytesMessage);
+    }
+
+    public NumberMessage getBrokerage(byte[] address) {
+        BytesMessage bytesMessage = BytesMessage.newBuilder().setValue(ByteString.copyFrom(address))
+                .build();
+        return blockingStubFull.getBrokerageInfo(bytesMessage);
+    }
+
+    public String send(String from, String to, long amount, String privateKey) throws TransactionException {
+        Transaction transaction = send(from, to, amount, ECKey.fromPrivate(ByteArray.fromHexString(privateKey)));
+        return getTxId(transaction);
+    }
+
+    private Transaction send(String from, String to, long amount, ECKey privateKey) throws TransactionException {
+        Transaction transactionSigned = signTransactionOffline(Objects.requireNonNull(createRawTransaction(from, to, amount)), privateKey);
+        return broadcastTransaction(transactionSigned);
+    }
+
+    public String sendTokens(String from, String to, String contract, long rawAmount, String privateKey, Double feeLimitInTrx) throws TransactionException {
+        Transaction transaction = createRawTrc20Transaction(from, to, contract, rawAmount, feeLimitInTrx);
+        Transaction signedTransaction = signTransactionOffline(transaction, privateKey);
+        Transaction broadcastTransaction = broadcastTransaction(signedTransaction);
+        return getTxId(broadcastTransaction);
+    }
+
+    public Transaction createRawTransaction(String from, String to, long amount) throws TransactionException {
+        return createRawTransactionInner(from, to, amount);
+    }
+
+    // if feeLimit is null, will use default = 10 TRX * TRX precision
+    public Transaction createRawTrc20Transaction(String from, String to, String contractAddress, long rawAmount, Double trxFeeLimit) throws TransactionException {
+        byte[] data = Hex.decode(AbiUtil.parseMethod("transfer(address,uint256)", String.format("\"%s\",%s", to, rawAmount), false));
+        Contract.TriggerSmartContract triggerSmartContractRequest = Contract.TriggerSmartContract.newBuilder()
+                .setContractAddress(ByteString.copyFrom(decodeFromBase58Check(contractAddress)))
+                .setOwnerAddress(ByteString.copyFrom(decodeFromBase58Check(from)))
+                .setData(ByteString.copyFrom(data))
+                .setCallValue(0)
+                .build();
+        TransactionExtention transactionExtention = triggerContract(triggerSmartContractRequest);
+        if (!(transactionExtention.hasResult() && transactionExtention.getResult().getCode() == response_code.SUCCESS)) {
+            throw new RuntimeException("Something went wrong. Response: " + transactionExtention);
         }
-      }
-      return new String(ArrayUtils.toPrimitive(resultList.toArray(new Byte[0])), StandardCharsets.UTF_8);
-    } else {
-      throw new RuntimeException("Something went wrong!");
+        Protocol.Block newestBlock = getBlock(-1);
+        Transaction originalTransaction = transactionExtention.getTransaction();
+
+        Transaction.Builder transactionBuilder = Transaction.newBuilder(originalTransaction);
+        transactionBuilder.getRawDataBuilder()
+                .setFeeLimit(trxFeeLimit == null ? 10_000_000 : ((long) (trxFeeLimit * 1000_000)))
+                .setTimestamp(System.currentTimeMillis())
+                .setExpiration(newestBlock.getBlockHeader().getRawData().getTimestamp() + 10 * 60 * 60 * 1000);
+        return setReference(transactionBuilder.build(), newestBlock);
     }
-  }
 
-   public Transaction signRawTransactionOnline(Transaction transaction, String privateKey) {
-      return TransactionUtils.signTransaction(transaction, ECKey.fromPrivate(ByteArray.fromHexString(privateKey))).getTransaction();
-   }
+    // amount is in RAW format (you can convert it to double/bigdecimal using getPrecision method)
+    public long getTrc20TokenBalance(String from, String contractAddress) {
+        byte[] data = Hex.decode(AbiUtil.parseMethod("balanceOf(address)", "\"" + from + "\"", false));
+        Contract.TriggerSmartContract triggerSmartContractRequest = Contract.TriggerSmartContract.newBuilder()
+                .setContractAddress(ByteString.copyFrom(decodeFromBase58Check(contractAddress)))
+                .setOwnerAddress(ByteString.copyFrom(decodeFromBase58Check(from)))
+                .setData(ByteString.copyFrom(data))
+                .setCallValue(0)
+                .build();
+        TransactionExtention transactionExtention = this.triggerConstantContract(triggerSmartContractRequest);
+        if (!(transactionExtention.hasResult() && transactionExtention.getResult().getCode() == response_code.SUCCESS) || !(
+                transactionExtention.getTransaction().getRetCount() != 0
+                        && transactionExtention.getConstantResult(0) != null
+                        && transactionExtention.getResult() != null
+        )) {
+            throw new RuntimeException("Something went wrong. Response: " + transactionExtention);
+        }
+        return new BigInteger(1, transactionExtention.getConstantResult(0).toByteArray()).longValueExact();
+    }
 
-   public Long getBalance(String address) {
-      return queryAccount(WalletApi.decodeFromBase58Check(address)).getBalance();
-   }
+    public int getPrecision(String from, String contractAddress) {
+        byte[] data = Hex.decode(AbiUtil.parseMethod("decimals()", "", false));
+        Contract.TriggerSmartContract triggerSmartContractRequest = Contract.TriggerSmartContract.newBuilder()
+                .setContractAddress(ByteString.copyFrom(decodeFromBase58Check(contractAddress)))
+                .setOwnerAddress(ByteString.copyFrom(decodeFromBase58Check(from)))
+                .setData(ByteString.copyFrom(data))
+                .setCallValue(0)
+                .build();
+        TransactionExtention transactionExtention = this.triggerConstantContract(triggerSmartContractRequest);
+        Transaction transaction = transactionExtention.getTransaction();
+        // for constant
+        if (transaction.getRetCount() != 0
+                && transactionExtention.getConstantResult(0) != null
+                && transactionExtention.getResult() != null) {
+            byte[] result = transactionExtention.getConstantResult(0).toByteArray();
+            return Integer.valueOf(result[result.length - 1]);
+        } else {
+            throw new RuntimeException("Something went wrong!");
+        }
+    }
 
-   public String getTxId(Transaction transaction) {
-       byte[] bytes = transaction.getRawData().toByteArray();
-       MessageDigest digest = newDigest();
-       digest.update(transaction.getRawData().toByteArray(), 0, bytes.length);
-       return ByteArray.toHexString(digest.digest());
-   }
+    public String getSymbol(String from, String contractAddress) {
+        byte[] data = Hex.decode(AbiUtil.parseMethod("symbol()", "", false));
+        Contract.TriggerSmartContract triggerSmartContractRequest = Contract.TriggerSmartContract.newBuilder()
+                .setContractAddress(ByteString.copyFrom(decodeFromBase58Check(contractAddress)))
+                .setOwnerAddress(ByteString.copyFrom(decodeFromBase58Check(from)))
+                .setData(ByteString.copyFrom(data))
+                .setCallValue(0)
+                .build();
+        TransactionExtention transactionExtention = this.triggerConstantContract(triggerSmartContractRequest);
+        Transaction transaction = transactionExtention.getTransaction();
+        // for constant
+        if (transaction.getRetCount() != 0
+                && transactionExtention.getConstantResult(0) != null
+                && transactionExtention.getResult() != null) {
+            byte[] result = transactionExtention.getConstantResult(0).toByteArray();
+            List<Byte> resultList = new ArrayList<>(result.length - 64);
+            for (byte b : Arrays.copyOfRange(result, 64, result.length)) {
+                if (b != 0) {
+                    resultList.add(b);
+                }
+            }
+            return new String(ArrayUtils.toPrimitive(resultList.toArray(new Byte[0])), StandardCharsets.UTF_8);
+        } else {
+            throw new RuntimeException("Something went wrong!");
+        }
+    }
+
+    public Long getBalance(String address) {
+        return queryAccount(decodeFromBase58Check(address)).getBalance();
+    }
+
+    private Transaction createRawTransactionInner(String from, String to, long amount) {
+        byte[] fromByte = decodeFromBase58Check(from);
+        byte[] toByte = decodeFromBase58Check(to);
+
+        Transaction.Builder transactionBuilder = Transaction.newBuilder();
+        Protocol.Block newestBlock = this.getBlock(-1);
+
+        Transaction.Contract.Builder contractBuilder = Transaction.Contract.newBuilder();
+        Contract.TransferContract.Builder transferContractBuilder = Contract.TransferContract
+                .newBuilder();
+        transferContractBuilder.setAmount(amount);
+        ByteString bsTo = ByteString.copyFrom(toByte);
+        ByteString bsOwner = ByteString.copyFrom(fromByte);
+        transferContractBuilder.setToAddress(bsTo);
+        transferContractBuilder.setOwnerAddress(bsOwner);
+        try {
+            Any any = Any.pack(transferContractBuilder.build());
+            contractBuilder.setParameter(any);
+        } catch (Exception e) {
+            return null;
+        }
+        contractBuilder.setType(Transaction.Contract.ContractType.TransferContract);
+        transactionBuilder.getRawDataBuilder().addContract(contractBuilder)
+                .setTimestamp(System.currentTimeMillis())
+                .setExpiration(newestBlock.getBlockHeader().getRawData().getTimestamp() + 10 * 60 * 60 * 1000);
+        Transaction transaction = transactionBuilder.build();
+        return setReference(transaction, newestBlock);
+    }
+
+    private Transaction setReference(Transaction transaction, Protocol.Block newestBlock) {
+        long blockHeight = newestBlock.getBlockHeader().getRawData().getNumber();
+        byte[] blockHash = getBlockHash(newestBlock).getBytes();
+        byte[] refBlockNum = ByteArray.fromLong(blockHeight);
+        Transaction.raw rawData = transaction.getRawData().toBuilder()
+                .setRefBlockHash(ByteString.copyFrom(ByteArray.subArray(blockHash, 8, 16)))
+                .setRefBlockBytes(ByteString.copyFrom(ByteArray.subArray(refBlockNum, 6, 8)))
+                .build();
+        return transaction.toBuilder().setRawData(rawData).build();
+    }
+
+    private static Sha256Hash getBlockHash(Protocol.Block block) {
+        return Sha256Hash.of(block.getBlockHeader().getRawData().toByteArray());
+    }
+
+    public static String getTxId(Transaction transaction) {
+        byte[] bytes = transaction.getRawData().toByteArray();
+        MessageDigest digest = newDigest();
+        digest.update(transaction.getRawData().toByteArray(), 0, bytes.length);
+        return ByteArray.toHexString(digest.digest());
+    }
 }

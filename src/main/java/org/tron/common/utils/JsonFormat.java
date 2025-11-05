@@ -35,7 +35,6 @@ import com.google.protobuf.Descriptors.EnumDescriptor;
 import com.google.protobuf.Descriptors.EnumValueDescriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import org.apache.commons.lang3.StringUtils;
-import org.tron.walletserver.WalletApi;
 
 import java.io.IOException;
 import java.math.BigInteger;
@@ -48,6 +47,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import static org.tron.common.utils.Utils.decodeFromBase58Check;
+import static org.tron.common.utils.Utils.encode58Check;
 
 
 /**
@@ -744,7 +746,7 @@ public class JsonFormat {
   static String escapeBytesSelfType(ByteString input, final String fliedName) {
     //Address
     if (HttpSelfFormatFieldName.isAddressFormat(fliedName)) {
-      return WalletApi.encode58Check(input.toByteArray());
+      return encode58Check(input.toByteArray());
     }
 
     //Normal String
@@ -1298,7 +1300,7 @@ public class JsonFormat {
         throws InvalidEscapeSequence {
       //Address base58 -> ByteString
       if (HttpSelfFormatFieldName.isAddressFormat(fliedName)) {
-        return ByteString.copyFrom(WalletApi.decodeFromBase58Check(input));
+        return ByteString.copyFrom(decodeFromBase58Check(input));
       }
 
       //Normal String -> ByteString
@@ -1313,7 +1315,7 @@ public class JsonFormat {
      * Are we at the end of the input.
      */
     public boolean atEnd() {
-      return currentToken.length() == 0;
+      return currentToken.isEmpty();
     }
 
     /**
@@ -1390,7 +1392,7 @@ public class JsonFormat {
      * Returns {@code true} if the next token is an integer, but does not consume it.
      */
     public boolean lookingAtInteger() {
-      if (currentToken.length() == 0) {
+      if (currentToken.isEmpty()) {
         return false;
       }
 
@@ -1402,7 +1404,7 @@ public class JsonFormat {
      * Returns {@code true} if the next token is a boolean (true/false), but does not consume it.
      */
     public boolean lookingAtBoolean() {
-      if (currentToken.length() == 0) {
+      if (currentToken.isEmpty()) {
         return false;
       }
 

@@ -21,8 +21,7 @@ package org.tron.common.crypto;
 import lombok.extern.slf4j.Slf4j;
 import org.tron.common.crypto.jce.TronCastleProvider;
 import org.tron.common.utils.ByteArray;
-import org.tron.walletserver.GrpcClientHolder;
-import org.tron.walletserver.WalletApi;
+import org.tron.common.utils.Utils;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -130,7 +129,7 @@ public class Hash {
   public static byte[] sha3omit12(byte[] input) {
     byte[] hash = sha3(input);
     byte[] address = copyOfRange(hash, 11, hash.length);
-    address[0] = GrpcClientHolder.getPrefix();
+    address[0] = Utils.PREFIX_BYTE_FOR_MAINNET;
     return address;
   }
 }
